@@ -66,7 +66,14 @@ from .jit_solvers import (
 # Import solver utilities
 from .solver_utils import (
     implicit_vjp,
-    ad_wrapper
+    ad_wrapper,
+    _ad_wrapper
+)
+
+# Import Newton solver wrapper
+from .newton_wrapper import (
+    NewtonSolver,
+    create_newton_solver
 )
 
 # Export list for clarity
@@ -117,5 +124,10 @@ __all__ = [
     
     # Automatic differentiation
     'implicit_vjp',
-    'ad_wrapper'
+    'ad_wrapper',
+    '_ad_wrapper',
+    
+    # Newton solver wrapper
+    'NewtonSolver',
+    'create_newton_solver'
 ]

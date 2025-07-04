@@ -7,74 +7,262 @@ GPU-accelerated finite element analysis (FEA) library built with JAX for computa
 ### Problem Setup
 
 ```python
+import jax.numpy as jnp
 from fealax.mesh import box_mesh
 from fealax.problem import Problem, DirichletBC
-from fealax.solver import newton_solve
+from fealax.solver import NewtonSolver
 
 # Create mesh
 mesh = box_mesh(10, 10, 10, 1.0, 1.0, 1.0, ele_type="HEX8")
 
 # Define boundary conditions
 bcs = [
-    DirichletBC(lambda x: x[2] < 1e-6, 2, lambda x: 0.0),  # Fix bottom in z
-    DirichletBC(lambda x: x[2] > 1.0 - 1e-6, 2, lambda x: -0.05),  # Compress top
+    DirichletBC(lambda x: jnp.abs(x[2]) < 1e-6, 2, lambda x: 0.0),       # Fix bottom
+    DirichletBC(lambda x: jnp.abs(x[2] - 1.0) < 1e-6, 2, lambda x: -0.05), # Compress top
 ]
 
-# Setup problem
-problem = Problem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs)
-
-# Define material properties in custom_init
+# Define elasticity problem with parameterized materials
 class ElasticityProblem(Problem):
-    def custom_init(self, E, nu):
-        self.E = E  # Young's modulus
-        self.nu = nu  # Poisson's ratio
+    def __init__(self, mesh, **kwargs):
+        self.E = None   # Young's modulus (set via parameters)
+        self.nu = None  # Poisson's ratio (set via parameters)
+        super().__init__(mesh=mesh, **kwargs)
+        
+    def set_params(self, params):
+        """Set material parameters."""
+        self.E = params['E']
+        self.nu = params['nu']
         
     def get_tensor_map(self):
-        def stress_strain(u_grad):
-            # Linear elasticity constitutive law
-            eps = 0.5 * (u_grad + jnp.transpose(u_grad, axes=(0, 2, 1)))
+        """Linear elasticity constitutive law."""
+        def stress_strain(u_grads):
+            strain = 0.5 * (u_grads + jnp.transpose(u_grads))
             lam = self.E * self.nu / ((1 + self.nu) * (1 - 2 * self.nu))
             mu = self.E / (2 * (1 + self.nu))
-            return lam * jnp.trace(eps, axis1=1, axis2=2)[:, None, None] * jnp.eye(3) + 2 * mu * eps
+            stress = 2 * mu * strain + lam * jnp.trace(strain) * jnp.eye(3)
+            return stress
         return stress_strain
 
-# Create problem with material properties
-problem = ElasticityProblem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs, 
-                           additional_info=(200e9, 0.3))  # Steel properties
+# Create problem
+problem = ElasticityProblem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs)
 ```
 
-### Solver Usage
+### Newton Solver Usage
+
+#### Basic Solving
 
 ```python
-# Simple Newton solver
-sol = newton_solve(problem, solver_options={'max_iter': 10, 'atol': 1e-8})
+# Create Newton solver
+solver = NewtonSolver(problem, {'tol': 1e-6, 'max_iter': 10})
 
-# JIT-compiled solver for performance
-sol = newton_solve(problem, solver_options={'jit': True})
-
-# Custom solver options
-solver_options = {
-    'max_iter': 20,
-    'atol': 1e-10,
-    'rtol': 1e-8,
-    'linear_solver': 'bicgstab',
-    'line_search': True,
-    'jit': True
+# Material parameters
+material_params = {
+    'E': 200e9,  # Young's modulus (Pa)
+    'nu': 0.3    # Poisson's ratio
 }
-sol = newton_solve(problem, solver_options=solver_options)
 
-# Low-level solver access
-from fealax.solver import _solver, _jit_solver
-sol = _solver(problem, solver_options)  # Legacy solver
-sol = _jit_solver(problem, solver_options)  # JIT-compiled legacy solver
+# Solve the problem
+solution = solver.solve(material_params)
+displacement_field = solution[0]  # Extract displacement field
+
+print(f"Solution shape: {displacement_field.shape}")
+print(f"Max displacement: {jnp.max(jnp.abs(displacement_field)):.6f} m")
 ```
 
-### Modular Architecture
+#### Performance Options
 
-The library is organized into clean, modular components:
+```python
+# JIT-compiled solver for better performance
+solver = NewtonSolver(problem, {
+    'tol': 1e-6,
+    'use_jit': True,     # Enable JIT compilation
+    'precond': True,     # Use preconditioning
+    'method': 'bicgstab' # Linear solver method
+})
+
+solution = solver.solve(material_params)
+```
+
+#### Differentiable Solver for Optimization
+
+```python
+import jax
+
+# Create differentiable solver
+diff_solver = NewtonSolver(problem, {
+    'tol': 1e-6,
+    'max_iter': 10
+}, differentiable=True)  # Enable automatic differentiation
+
+# Define objective function (e.g., compliance minimization)
+def compliance_objective(params):
+    solution = diff_solver.solve(params)
+    displacement = solution[0]
+    return jnp.sum(displacement**2)  # Simple compliance measure
+
+# Compute gradients with respect to material parameters
+grad_fn = jax.grad(compliance_objective)
+gradients = grad_fn(material_params)
+
+print(f"∂C/∂E = {gradients['E']:.2e}")
+print(f"∂C/∂ν = {gradients['nu']:.2e}")
+```
+
+#### Parameter Studies and Optimization
+
+```python
+# Parameter sweep
+E_values = jnp.linspace(100e9, 300e9, 10)
+compliances = []
+
+for E in E_values:
+    params = {'E': float(E), 'nu': 0.3}
+    solution = solver.solve(params)
+    compliance = jnp.sum(solution[0]**2)
+    compliances.append(compliance)
+
+# Optimization loop
+def optimize_material():
+    """Simple gradient-based optimization."""
+    params = {'E': 200e9, 'nu': 0.3}
+    learning_rate = 1e-10
+    
+    for i in range(10):
+        gradients = grad_fn(params)
+        # Update parameters (gradient descent)
+        params['E'] -= learning_rate * gradients['E']
+        params['nu'] -= learning_rate * gradients['nu']
+        
+        # Compute objective
+        obj_value = compliance_objective(params)
+        print(f"Iteration {i}: Objective = {obj_value:.6e}")
+    
+    return params
+
+optimized_params = optimize_material()
+```
+
+#### Advanced Configuration
+
+```python
+# Advanced solver options
+advanced_solver = NewtonSolver(
+    problem=problem,
+    solver_options={
+        'tol': 1e-8,              # Convergence tolerance
+        'rel_tol': 1e-10,         # Relative tolerance
+        'max_iter': 20,           # Maximum Newton iterations
+        'method': 'bicgstab',     # Linear solver: 'bicgstab', 'cg'
+        'precond': True,          # Enable Jacobi preconditioning
+        'line_search_flag': True, # Enable line search
+        'use_jit': True           # JIT compilation
+    },
+    differentiable=True,          # Enable automatic differentiation
+    adjoint_solver_options={      # Options for adjoint system
+        'tol': 1e-10,
+        'method': 'bicgstab'
+    },
+    use_jit=True                  # JIT-compile the entire wrapper
+)
+
+# Dynamic configuration updates
+advanced_solver.update_solver_options({'tol': 1e-10})
+advanced_solver.update_adjoint_options({'method': 'cg'})
+
+# Convert between differentiable and non-differentiable modes
+advanced_solver.make_non_differentiable()  # Disable AD
+advanced_solver.make_differentiable()      # Re-enable AD
+
+# Check solver properties
+print(f"Is differentiable: {advanced_solver.is_differentiable}")
+print(f"Is JIT compiled: {advanced_solver.is_jit_compiled}")
+```
+
+### Legacy Solver Interface
+
+```python
+# Backward compatibility with original API
+from fealax.solver import newton_solve, ad_wrapper
+
+# Original newton_solve function
+solution = newton_solve(problem, {'tol': 1e-6, 'use_jit': True})
+
+# Original ad_wrapper for automatic differentiation
+differentiable_solver = ad_wrapper(problem, {'tol': 1e-6})
+solution = differentiable_solver(material_params)
+```
+
+## Key Features
+
+### 🚀 Modern Solver API
+- **`NewtonSolver` wrapper**: Clean `solver.solve(params)` interface
+- **JAX automation chains**: Seamless integration with `jax.grad`, `jax.jit`
+- **Parameter-driven**: Material properties and parameters passed to solve
+- **Dynamic configuration**: Update solver options on the fly
+
+### 🎯 Automatic Differentiation
+- **Adjoint method**: Efficient gradient computation through FE solutions
+- **Parameter sensitivity**: Gradients w.r.t. material properties, geometry
+- **Optimization ready**: Drop-in compatibility with JAX optimizers
+- **Hybrid approach**: Manual adjoint solve + JAX VJP for optimal performance
+
+### ⚡ High Performance
+- **GPU acceleration**: JAX-based implementation with NVIDIA GPU support
+- **JIT compilation**: High-performance compiled solver kernels
+- **Memory efficient**: Optimized sparse matrix operations
+- **Scalable**: Handles large finite element problems (100k+ elements)
+
+### 🔧 Comprehensive FE Capabilities
+- **Multiple element types**: HEX8/20, TET4/10, QUAD4/8, TRI3/6
+- **Advanced solvers**: Newton-Raphson with line search, BiCGSTAB, CG
+- **Boundary conditions**: Flexible Dirichlet BC specification
+- **Material models**: Linear elasticity, hyperelasticity support
+
+### 🔄 Flexible Architecture
+- **Backward compatible**: Existing `newton_solve`, `ad_wrapper` still work
+- **Modular design**: Clean separation of concerns
+- **Easy migration**: Smooth transition from legacy to new API
+
+## Use Cases
+
+### Research & Development
+```python
+# Quick prototyping with automatic differentiation
+solver = NewtonSolver(problem, options, differentiable=True)
+sensitivity = jax.grad(objective)(material_params)
+```
+
+### Parameter Optimization
+```python
+# Material property optimization
+def objective(params):
+    return compliance(solver.solve(params))
+
+optimizer = optax.adam(1e-3)
+optimized_params = optimization_loop(jax.grad(objective), initial_params)
+```
+
+### High-Performance Computing
+```python
+# Large-scale problems with JIT compilation
+solver = NewtonSolver(problem, {'use_jit': True}, use_jit=True)
+solution = solver.solve(params)  # GPU-accelerated, JIT-compiled
+```
+
+### Design Space Exploration
+```python
+# Parameter sweeps and sensitivity studies
+for E in E_range:
+    solution = solver.solve({'E': E, 'nu': 0.3})
+    results.append(post_process(solution))
+```
+
+## Architecture
 
 **Solver Module** (`fealax.solver`):
-- `newton_solve()` - Main Newton solver interface
+- `NewtonSolver` - Modern wrapper with clean API
+- `newton_solve()` - Legacy Newton solver interface  
+- `ad_wrapper()` - Legacy automatic differentiation wrapper
 - `linear_solvers` - JAX-based linear solvers (BiCGSTAB, CG, sparse direct)
 - `newton_solvers` - Newton-Raphson implementations with line search
 - `jit_solvers` - JIT-compiled versions for performance
@@ -83,16 +271,94 @@ The library is organized into clean, modular components:
 
 **Problem Module** (`fealax.problem`):
 - `Problem` - Main finite element problem class
-- `DirichletBC` - Boundary condition specification
-- `kernels` - Weak form kernel generation  
+- `DirichletBC` - Boundary condition specification  
+- `kernels` - Weak form kernel generation
 - `assembly` - Global assembly and sparse matrix construction
 - `boundary_conditions` - BC management and processing
 
-## Features
+## Examples
 
-- **GPU Acceleration**: JAX-based implementation with NVIDIA GPU support
-- **Automatic Differentiation**: Automatic Jacobian computation for Newton methods
-- **Multiple Element Types**: HEX8/20, TET4/10, QUAD4/8, TRI3/6
-- **Advanced Solvers**: Newton-Raphson with line search, arc-length continuation
-- **Memory Management**: Efficient handling of large finite element problems
-- **JIT Compilation**: High-performance JIT-compiled solver kernels
+See the `examples/` directory for complete working examples:
+
+### Basic Examples
+- **`simple_elasticity.py`** - 3D linear elasticity with compression loading
+  - NewtonSolver wrapper usage
+  - Parameter-driven material properties
+  - Automatic differentiation for sensitivity analysis
+  - Performance optimization with JIT compilation
+
+### Migration Guide
+
+**From Legacy API:**
+```python
+# Old approach
+from fealax.solver import newton_solve, ad_wrapper
+
+solution = newton_solve(problem, solver_options)
+
+# For optimization
+diff_solver = ad_wrapper(problem, solver_options)
+solution = diff_solver(params)
+```
+
+**To New API:**
+```python
+# New approach - cleaner and more flexible
+from fealax.solver import NewtonSolver
+
+solver = NewtonSolver(problem, solver_options)
+solution = solver.solve(params)
+
+# For optimization - same interface
+diff_solver = NewtonSolver(problem, solver_options, differentiable=True)
+solution = diff_solver.solve(params)
+```
+
+### Performance Tips
+
+1. **Enable JIT compilation** for repeated solves:
+   ```python
+   solver = NewtonSolver(problem, {'use_jit': True}, use_jit=True)
+   ```
+
+2. **Use preconditioning** for faster convergence:
+   ```python
+   solver = NewtonSolver(problem, {'precond': True, 'method': 'bicgstab'})
+   ```
+
+3. **Batch parameter studies** efficiently:
+   ```python
+   # JIT-compile once, solve many times
+   solver = NewtonSolver(problem, options, use_jit=True)
+   results = [solver.solve(params) for params in param_list]
+   ```
+
+4. **Optimize solver tolerances** for your problem:
+   ```python
+   # Tighter tolerances for accuracy
+   solver = NewtonSolver(problem, {'tol': 1e-8, 'rel_tol': 1e-10})
+   
+   # Looser tolerances for speed
+   solver = NewtonSolver(problem, {'tol': 1e-4, 'max_iter': 5})
+   ```
+
+## Installation
+
+```bash
+# Development installation
+pip install -e .
+
+# JAX with GPU support (install separately)
+pip install jax[cuda]
+
+# For examples and visualization
+pip install matplotlib vtk meshio
+```
+
+## GPU Requirements
+
+- NVIDIA GPU with CUDA support
+- JAX CUDA installation
+- Sufficient GPU memory for problem size
+
+The library automatically uses GPU acceleration when available. For large problems (>100k DOFs), GPU acceleration provides significant speedup over CPU-only computation.

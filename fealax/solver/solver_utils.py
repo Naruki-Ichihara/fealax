@@ -126,7 +126,12 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
     problem.set_params(params)
     problem.newton_update(sol_list)
 
-    A, A_reduced = get_A(problem)
+    A_result = get_A(problem)
+    if problem.prolongation_matrix is not None:
+        A, A_reduced = A_result
+    else:
+        A = A_result
+        A_reduced = A
     v_vec = jax.flatten_util.ravel_pytree(v_list)[0]
 
     if problem.prolongation_matrix is not None:
@@ -152,12 +157,11 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
     return vjp_result
 
 
-def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}, use_jit: bool = False) -> Callable[[Any], List[np.ndarray]]:
-    """Create automatic differentiation wrapper for the solver.
+def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}, use_jit: bool = False) -> Callable[[Any], List[np.ndarray]]:
+    """Internal automatic differentiation wrapper for the solver.
     
-    Wraps the nonlinear solver with JAX's custom VJP (vector-Jacobian product)
-    to enable automatic differentiation through the solution process. This allows
-    the solver to be used in optimization loops and gradient-based algorithms.
+    This is the internal implementation used by the NewtonSolver wrapper class.
+    Direct use of this function is discouraged - use the NewtonSolver class instead.
     
     Args:
         problem (Problem): Finite element problem template.
@@ -168,30 +172,12 @@ def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver
     Returns:
         Callable: JAX-differentiable function that takes parameters and returns solution.
         
-    Example:
-        Setup for parameter optimization:
-        
-        >>> differentiable_solver = ad_wrapper(problem)
-        >>> 
-        >>> def objective(params):
-        ...     solution = differentiable_solver(params)
-        ...     return compute_objective(solution)
-        >>> 
-        >>> grad_fn = jax.grad(objective)
-        >>> gradients = grad_fn(initial_params)
-        
-        With JIT compilation for better performance:
-        
-        >>> jit_differentiable_solver = ad_wrapper(problem, use_jit=True)
-        >>> jit_grad_fn = jax.grad(lambda p: objective_fn(jit_differentiable_solver(p)))
-        
     Note:
-        The wrapper uses implicit differentiation via the adjoint method to
-        compute gradients efficiently, avoiding the need to differentiate
-        through the entire Newton iteration process.
+        This is an internal function. Use NewtonSolver wrapper class for public API:
         
-        When use_jit=True, the returned function is JIT-compiled for better
-        performance in optimization loops, but may have longer initial compilation time.
+        >>> from fealax.solver import NewtonSolver
+        >>> solver = NewtonSolver(problem, solver_options, differentiable=True)
+        >>> solution = solver.solve(params)
     """
     @jax.custom_vjp
     def fwd_pred(params):
@@ -228,3 +214,38 @@ def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver
         return jax.jit(fwd_pred)
     else:
         return fwd_pred
+
+
+def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}, use_jit: bool = False) -> Callable[[Any], List[np.ndarray]]:
+    """Create automatic differentiation wrapper for the solver.
+    
+    This function provides backward compatibility with the original ad_wrapper API.
+    For new code, consider using the NewtonSolver wrapper class which provides
+    a cleaner, more object-oriented interface.
+    
+    Args:
+        problem (Problem): Finite element problem template.
+        solver_options (dict, optional): Options for forward solver. Defaults to {}.
+        adjoint_solver_options (dict, optional): Options for adjoint solver. Defaults to {}.
+        use_jit (bool, optional): Whether to JIT-compile the wrapper. Defaults to False.
+        
+    Returns:
+        Callable: JAX-differentiable function that takes parameters and returns solution.
+        
+    Example:
+        Traditional usage:
+        
+        >>> differentiable_solver = ad_wrapper(problem)
+        >>> solution = differentiable_solver(params)
+        
+        Recommended usage with NewtonSolver:
+        
+        >>> from fealax.solver import NewtonSolver
+        >>> solver = NewtonSolver(problem, solver_options, differentiable=True)
+        >>> solution = solver.solve(params)
+        
+    Note:
+        This function is provided for backward compatibility. The NewtonSolver
+        wrapper class offers a more intuitive API for new projects.
+    """
+    return _ad_wrapper(problem, solver_options, adjoint_solver_options, use_jit)
