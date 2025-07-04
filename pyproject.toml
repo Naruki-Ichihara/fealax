@@ -25,3 +25,8 @@ addopts = [
     "--strict-config", 
     "-v"
 ]
+markers = [
+    "env_validation: Environment validation tests",
+    "gpu: GPU-related tests requiring NVIDIA drivers",
+    "solver: Solver functionality tests"
+]

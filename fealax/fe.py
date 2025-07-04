@@ -5,13 +5,13 @@ from typing import Callable, List, Optional, Union, Tuple
 
 import jax
 import jax.numpy as np
-import numpy as onp
+# import numpy as onp  # Removed - using JAX numpy only
 
 from fealax import logger
 from .basis import get_face_shape_vals_and_grads, get_shape_vals_and_grads
 from .mesh import Mesh
 
-onp.set_printoptions(threshold=sys.maxsize, linewidth=1000, suppress=True, precision=5)
+np.set_printoptions(threshold=sys.maxsize, linewidth=1000, suppress=True, precision=5)
 
 
 @dataclass
@@ -97,7 +97,7 @@ class FiniteElement:
             f"Element type is {self.ele_type}, using {self.num_quads} quad points per element."
         )
 
-    def get_shape_grads(self) -> Tuple[onp.ndarray, onp.ndarray]:
+    def get_shape_grads(self) -> Tuple[np.ndarray, np.ndarray]:
         """Compute shape function gradient value.
 
         The gradient is w.r.t physical coordinates.
@@ -105,27 +105,27 @@ class FiniteElement:
         Page 147, Eq. (3.9.3)
 
         Returns:
-            Tuple[onp.ndarray, onp.ndarray]: A tuple containing:
-                - shape_grads_physical (onp.ndarray): Shape function gradients with shape
+            Tuple[np.ndarray, np.ndarray]: A tuple containing:
+                - shape_grads_physical (np.ndarray): Shape function gradients with shape
                   (num_cells, num_quads, num_nodes, dim).
-                - JxW (onp.ndarray): Jacobian determinant times quadrature weights with shape
+                - JxW (np.ndarray): Jacobian determinant times quadrature weights with shape
                   (num_cells, num_quads).
         """
         assert self.shape_grads_ref.shape == (self.num_quads, self.num_nodes, self.dim)
-        physical_coos = onp.take(
+        physical_coos = np.take(
             self.points, self.cells, axis=0
         )  # (num_cells, num_nodes, dim)
         # (num_cells, num_quads, num_nodes, dim, dim) -> (num_cells, num_quads, 1, dim, dim)
-        jacobian_dx_deta = onp.sum(
+        jacobian_dx_deta = np.sum(
             physical_coos[:, None, :, :, None]
             * self.shape_grads_ref[None, :, :, None, :],
             axis=2,
             keepdims=True,
         )
-        jacobian_det = onp.linalg.det(jacobian_dx_deta)[
+        jacobian_det = np.linalg.det(jacobian_dx_deta)[
             :, :, 0
         ]  # (num_cells, num_quads)
-        jacobian_deta_dx = onp.linalg.inv(jacobian_dx_deta)
+        jacobian_deta_dx = np.linalg.inv(jacobian_dx_deta)
         # (1, num_quads, num_nodes, 1, dim) @ (num_cells, num_quads, 1, dim, dim)
         # (num_cells, num_quads, num_nodes, 1, dim) -> (num_cells, num_quads, num_nodes, dim)
         shape_grads_physical = (
@@ -134,23 +134,23 @@ class FiniteElement:
         JxW = jacobian_det * self.quad_weights[None, :]
         return shape_grads_physical, JxW
 
-    def get_face_shape_grads(self, boundary_inds: List[onp.ndarray]) -> Tuple[onp.ndarray, onp.ndarray]:
+    def get_face_shape_grads(self, boundary_inds: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """Face shape function gradients and JxW (for surface integral).
 
         Nanson's formula is used to map physical surface integral to reference domain.
         Reference: https://en.wikiversity.org/wiki/Continuum_mechanics/Volume_change_and_area_change
 
         Args:
-            boundary_inds (List[onp.ndarray]): Boundary indices with shape (num_selected_faces, 2).
+            boundary_inds (List[np.ndarray]): Boundary indices with shape (num_selected_faces, 2).
 
         Returns:
-            Tuple[onp.ndarray, onp.ndarray]: A tuple containing:
-                - face_shape_grads_physical (onp.ndarray): Face shape function gradients with shape
+            Tuple[np.ndarray, np.ndarray]: A tuple containing:
+                - face_shape_grads_physical (np.ndarray): Face shape function gradients with shape
                   (num_selected_faces, num_face_quads, num_nodes, dim).
-                - nanson_scale (onp.ndarray): Nanson scaling factor with shape
+                - nanson_scale (np.ndarray): Nanson scaling factor with shape
                   (num_selected_faces, num_face_quads).
         """
-        physical_coos = onp.take(
+        physical_coos = np.take(
             self.points, self.cells, axis=0
         )  # (num_cells, num_nodes, dim)
         selected_coos = physical_coos[
@@ -165,15 +165,15 @@ class FiniteElement:
 
         # (num_selected_faces, 1, num_nodes, dim, 1) * (num_selected_faces, num_face_quads, num_nodes, 1, dim)
         # (num_selected_faces, num_face_quads, num_nodes, dim, dim) -> (num_selected_faces, num_face_quads, dim, dim)
-        jacobian_dx_deta = onp.sum(
+        jacobian_dx_deta = np.sum(
             selected_coos[:, None, :, :, None]
             * selected_f_shape_grads_ref[:, :, :, None, :],
             axis=2,
         )
-        jacobian_det = onp.linalg.det(
+        jacobian_det = np.linalg.det(
             jacobian_dx_deta
         )  # (num_selected_faces, num_face_quads)
-        jacobian_deta_dx = onp.linalg.inv(
+        jacobian_deta_dx = np.linalg.inv(
             jacobian_dx_deta
         )  # (num_selected_faces, num_face_quads, dim, dim)
 
@@ -186,7 +186,7 @@ class FiniteElement:
 
         # (num_selected_faces, 1, 1, dim) @ (num_selected_faces, num_face_quads, dim, dim)
         # (num_selected_faces, num_face_quads, 1, dim) -> (num_selected_faces, num_face_quads)
-        nanson_scale = onp.linalg.norm(
+        nanson_scale = np.linalg.norm(
             (selected_f_normals[:, None, None, :] @ jacobian_deta_dx)[:, :, 0, :],
             axis=-1,
         )
@@ -196,30 +196,30 @@ class FiniteElement:
         nanson_scale = nanson_scale * jacobian_det * selected_weights
         return face_shape_grads_physical, nanson_scale
 
-    def get_physical_quad_points(self) -> onp.ndarray:
+    def get_physical_quad_points(self) -> np.ndarray:
         """Compute physical quadrature points.
 
         Returns:
-            onp.ndarray: Physical quadrature points with shape (num_cells, num_quads, dim).
+            np.ndarray: Physical quadrature points with shape (num_cells, num_quads, dim).
         """
-        physical_coos = onp.take(self.points, self.cells, axis=0)
+        physical_coos = np.take(self.points, self.cells, axis=0)
         # (1, num_quads, num_nodes, 1) * (num_cells, 1, num_nodes, dim) -> (num_cells, num_quads, dim)
-        physical_quad_points = onp.sum(
+        physical_quad_points = np.sum(
             self.shape_vals[None, :, :, None] * physical_coos[:, None, :, :], axis=2
         )
         return physical_quad_points
 
-    def get_physical_surface_quad_points(self, boundary_inds: List[onp.ndarray]) -> onp.ndarray:
+    def get_physical_surface_quad_points(self, boundary_inds: List[np.ndarray]) -> np.ndarray:
         """Compute physical quadrature points on the surface.
 
         Args:
-            boundary_inds (List[onp.ndarray]): Boundary indices with shape (num_selected_faces, 2).
+            boundary_inds (List[np.ndarray]): Boundary indices with shape (num_selected_faces, 2).
 
         Returns:
-            onp.ndarray: Physical surface quadrature points with shape
+            np.ndarray: Physical surface quadrature points with shape
                 (num_selected_faces, num_face_quads, dim).
         """
-        physical_coos = onp.take(self.points, self.cells, axis=0)
+        physical_coos = np.take(self.points, self.cells, axis=0)
         selected_coos = physical_coos[
             boundary_inds[:, 0]
         ]  # (num_selected_faces, num_nodes, dim)
@@ -227,13 +227,13 @@ class FiniteElement:
             boundary_inds[:, 1]
         ]  # (num_selected_faces, num_face_quads, num_nodes)
         # (num_selected_faces, num_face_quads, num_nodes, 1) * (num_selected_faces, 1, num_nodes, dim) -> (num_selected_faces, num_face_quads, dim)
-        physical_surface_quad_points = onp.sum(
+        physical_surface_quad_points = np.sum(
             selected_face_shape_vals[:, :, :, None] * selected_coos[:, None, :, :],
             axis=2,
         )
         return physical_surface_quad_points
 
-    def Dirichlet_boundary_conditions(self, dirichlet_bc_info: Optional[List[Union[List[Callable], List[int], List[Callable]]]]) -> Tuple[List[onp.ndarray], List[onp.ndarray], List[onp.ndarray]]:
+    def Dirichlet_boundary_conditions(self, dirichlet_bc_info: Optional[List[Union[List[Callable], List[int], List[Callable]]]]) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
         """Indices and values for Dirichlet boundary conditions.
 
         Args:
@@ -241,10 +241,10 @@ class FiniteElement:
                 Dirichlet boundary condition information containing [location_fns, vecs, value_fns].
 
         Returns:
-            Tuple[List[onp.ndarray], List[onp.ndarray], List[onp.ndarray]]: A tuple containing:
-                - node_inds_list (List[onp.ndarray]): Node indices ranging from 0 to num_total_nodes - 1.
-                - vec_inds_list (List[onp.ndarray]): Vector component indices ranging from 0 to vec - 1.
-                - vals_list (List[onp.ndarray]): Dirichlet values to be assigned.
+            Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]: A tuple containing:
+                - node_inds_list (List[np.ndarray]): Node indices ranging from 0 to num_total_nodes - 1.
+                - vec_inds_list (List[np.ndarray]): Vector component indices ranging from 0 to vec - 1.
+                - vals_list (List[np.ndarray]): Dirichlet values to be assigned.
         """
         node_inds_list = []
         vec_inds_list = []
@@ -263,12 +263,12 @@ class FiniteElement:
                         f"Wrong number of arguments for location_fn: must be 1 or 2, get {num_args}"
                     )
 
-                node_inds = onp.argwhere(
+                node_inds = np.argwhere(
                     jax.vmap(location_fn)(
                         self.mesh.points, np.arange(self.num_total_nodes)
                     )
                 ).reshape(-1)
-                vec_inds = onp.ones_like(node_inds, dtype=onp.int32) * vecs[i]
+                vec_inds = np.ones_like(node_inds, dtype=np.int32) * vecs[i]
                 values = jax.vmap(value_fns[i])(
                     self.mesh.points[node_inds].reshape(-1, self.dim)
                 ).reshape(-1)
@@ -291,7 +291,7 @@ class FiniteElement:
             self.Dirichlet_boundary_conditions(dirichlet_bc_info)
         )
 
-    def get_boundary_conditions_inds(self, location_fns: Optional[List[Callable]]) -> List[onp.ndarray]:
+    def get_boundary_conditions_inds(self, location_fns: Optional[List[Callable]]) -> List[np.ndarray]:
         """Given location functions, compute which faces satisfy the condition.
 
         Args:
@@ -303,20 +303,20 @@ class FiniteElement:
                 If the function takes 2 arguments, the first is point and the second is index.
 
         Returns:
-            List[onp.ndarray]: List of boundary indices with shape (num_selected_faces, 2).
+            List[np.ndarray]: List of boundary indices with shape (num_selected_faces, 2).
                 - boundary_inds_list[k][i, 0] returns the global cell index of the ith selected face
                   of boundary subset k.
                 - boundary_inds_list[k][i, 1] returns the local face index of the ith selected face
                   of boundary subset k.
         """
         # TODO: assume this works for all variables, and return the same result
-        cell_points = onp.take(
+        cell_points = np.take(
             self.points, self.cells, axis=0
         )  # (num_cells, num_nodes, dim)
-        cell_face_points = onp.take(
+        cell_face_points = np.take(
             cell_points, self.face_inds, axis=1
         )  # (num_cells, num_faces, num_face_vertices, dim)
-        cell_face_inds = onp.take(
+        cell_face_inds = np.take(
             self.cells, self.face_inds, axis=1
         )  # (num_cells, num_faces, num_face_vertices)
         boundary_inds_list = []
@@ -336,11 +336,11 @@ class FiniteElement:
 
                 def on_boundary(cell_points, cell_inds):
                     boundary_flag = vmap_location_fn(cell_points, cell_inds)
-                    return onp.all(boundary_flag)
+                    return np.all(boundary_flag)
 
                 vvmap_on_boundary = jax.vmap(jax.vmap(on_boundary))
                 boundary_flags = vvmap_on_boundary(cell_face_points, cell_face_inds)
-                boundary_inds = onp.argwhere(boundary_flags)  # (num_selected_faces, 2)
+                boundary_inds = np.argwhere(boundary_flags)  # (num_selected_faces, 2)
                 boundary_inds_list.append(boundary_inds)
 
         return boundary_inds_list
@@ -360,12 +360,12 @@ class FiniteElement:
         u = np.sum(cells_sol[:, None, :, :] * self.shape_vals[None, :, :, None], axis=2)
         return u
 
-    def convert_from_dof_to_face_quad(self, sol: np.ndarray, boundary_inds: onp.ndarray) -> np.ndarray:
+    def convert_from_dof_to_face_quad(self, sol: np.ndarray, boundary_inds: np.ndarray) -> np.ndarray:
         """Obtain surface solution from nodal solution.
 
         Args:
             sol (np.DeviceArray): Nodal solution with shape (num_total_nodes, vec).
-            boundary_inds (onp.ndarray): Boundary indices.
+            boundary_inds (np.ndarray): Boundary indices.
 
         Returns:
             np.DeviceArray: Surface solution values with shape (num_selected_faces, num_face_quads, vec).
@@ -430,7 +430,7 @@ class FiniteElement:
             print("\n\n### Dirichlet B.C. is specified")
             for i in range(len(self.node_inds_list)):
                 print(f"\nDirichlet Boundary part {i + 1} information:")
-                bc_array = onp.stack(
+                bc_array = np.stack(
                     [self.node_inds_list[i], self.vec_inds_list[i], self.vals_list[i]]
                 ).T
                 print(bc_array)

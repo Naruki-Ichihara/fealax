@@ -13,13 +13,16 @@ The module supports:
     - Integration with JAX for GPU acceleration
 
 Key Classes:
-    DirichletBC: Dirichlet boundary condition specification
     Problem: Main finite element problem class with assembly and solution methods
+    
+Note:
+    DirichletBC is now located in fealax.problem.boundary_conditions
 
 Example:
     Basic usage for defining a finite element problem:
 
-    >>> from fealax.problem import Problem, DirichletBC
+    >>> from fealax.problem import Problem
+    >>> from fealax.problem.boundary_conditions import DirichletBC
     >>> from fealax.mesh import box_mesh
     >>>
     >>> mesh = box_mesh(10, 10, 10, 1.0, 1.0, 1.0)
@@ -29,52 +32,28 @@ Example:
     >>> problem = Problem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=dirichlet_bcs)
 """
 
-import numpy as onp
 import jax
 import jax.numpy as np
 import jax.flatten_util
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, List, Iterable, Union, Tuple
 import functools
-import scipy
+from jax.experimental.sparse import BCOO
 from fealax.mesh import Mesh
 from fealax.fe import FiniteElement
 from fealax import logger
+from fealax.problem.boundary_conditions import (
+    DirichletBC,
+    BoundaryConditionManager,
+    process_dirichlet_bcs,
+    validate_dirichlet_bcs,
+)
+from fealax.problem.kernels import KernelGenerator
+from fealax.problem.assembly import AssemblyManager
 import gc
 
 
-@dataclass
-class DirichletBC:
-    """Dirichlet boundary condition specification.
-
-    Defines a Dirichlet (essential) boundary condition by specifying the subdomain
-    where the condition applies, which vector component to constrain, and the
-    prescribed value function.
-
-    Attributes:
-        subdomain (Callable): Function that defines the boundary subdomain.
-            Takes a point coordinate array and returns boolean indicating
-            whether the boundary condition applies at that location.
-            Signature: subdomain(x: np.ndarray) -> bool
-        vec (int): Vector component index to apply the boundary condition to.
-            Must be in range [0, vec-1] where vec is the number of solution
-            components (e.g., 0, 1, 2 for x, y, z components of displacement).
-        eval (Callable): Function that evaluates the prescribed boundary value.
-            Takes a point coordinate array and returns the prescribed value.
-            Signature: eval(x: np.ndarray) -> float
-
-    Example:
-        >>> # Fixed displacement in x-direction on left boundary
-        >>> bc = DirichletBC(
-        ...     subdomain=lambda x: np.abs(x[0]) < 1e-6,  # left boundary
-        ...     vec=0,  # x-component
-        ...     eval=lambda x: 0.0  # zero displacement
-        ... )
-    """
-
-    subdomain: Callable[[np.ndarray], bool]
-    vec: int
-    eval: Callable[[np.ndarray], float]
+# DirichletBC is now imported from fealax.problem.boundary_conditions
 
 
 @dataclass
@@ -127,7 +106,7 @@ class Problem:
     dirichlet_bcs: Optional[Iterable[DirichletBC]] = None
     neumann_subdomains: Optional[List[Callable[[np.ndarray], bool]]] = None
     additional_info: Any = ()
-    prolongation_matrix: Optional[scipy.sparse.csr_matrix] = None
+    prolongation_matrix: Optional[BCOO] = None
     macro_term: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
@@ -162,14 +141,15 @@ class Problem:
             self.ele_type = [self.ele_type]
             self.gauss_order = [self.gauss_order]
 
+        # Process Dirichlet boundary conditions
+        self.dirichlet_bc_info = process_dirichlet_bcs(self.dirichlet_bcs)
+        
+        # Validate boundary conditions if present
         if self.dirichlet_bcs is not None:
-            self.dirichlet_bc_info = [
-                [bc.subdomain for bc in self.dirichlet_bcs],
-                [bc.vec for bc in self.dirichlet_bcs],
-                [bc.eval for bc in self.dirichlet_bcs],
-            ]
-        else:
-            self.dirichlet_bc_info = None
+            # Convert to list format for validation
+            vec_list = self.vec if isinstance(self.vec, list) else [self.vec]
+            max_vec = max(vec_list)
+            validate_dirichlet_bcs(self.dirichlet_bcs, max_vec)
 
         self.num_vars = len(self.mesh)
 
@@ -217,26 +197,26 @@ class Problem:
             return np.hstack(inds)
 
         # (num_cells, num_nodes*vec + ...)
-        inds = onp.array(jax.vmap(find_ind)(*self.cells_list))
-        self.I = onp.repeat(inds[:, :, None], inds.shape[1], axis=2).reshape(-1)
-        self.J = onp.repeat(inds[:, None, :], inds.shape[1], axis=1).reshape(-1)
+        inds = np.array(jax.vmap(find_ind)(*self.cells_list))
+        self.I = np.repeat(inds[:, :, None], inds.shape[1], axis=2).reshape(-1)
+        self.J = np.repeat(inds[:, None, :], inds.shape[1], axis=1).reshape(-1)
         self.cells_list_face_list = []
 
         for i, boundary_inds in enumerate(self.boundary_inds_list):
             cells_list_face = [
                 cells[boundary_inds[:, 0]] for cells in self.cells_list
             ]  # [(num_selected_faces, num_nodes), ...]
-            inds_face = onp.array(
+            inds_face = np.array(
                 jax.vmap(find_ind)(*cells_list_face)
             )  # (num_selected_faces, num_nodes*vec + ...)
-            I_face = onp.repeat(
+            I_face = np.repeat(
                 inds_face[:, :, None], inds_face.shape[1], axis=2
             ).reshape(-1)
-            J_face = onp.repeat(
+            J_face = np.repeat(
                 inds_face[:, None, :], inds_face.shape[1], axis=1
             ).reshape(-1)
-            self.I = onp.hstack((self.I, I_face))
-            self.J = onp.hstack((self.J, J_face))
+            self.I = np.hstack((self.I, I_face))
+            self.J = np.hstack((self.J, J_face))
             self.cells_list_face_list.append(cells_list_face)
 
         self.cells_flat = jax.vmap(lambda *x: jax.flatten_util.ravel_pytree(x)[0])(
@@ -244,7 +224,6 @@ class Problem:
         )  # (num_cells, num_nodes + ...)
 
         dumb_array_dof = [np.zeros((fe.num_nodes, fe.vec)) for fe in self.fes]
-        # TODO: dumb_array_dof is useless?
         dumb_array_node = [np.zeros(fe.num_nodes) for fe in self.fes]
         # _, unflatten_fn_node = jax.flatten_util.ravel_pytree(dumb_array_node)
         _, self.unflatten_fn_dof = jax.flatten_util.ravel_pytree(dumb_array_dof)
@@ -255,15 +234,21 @@ class Problem:
         )
         self.num_total_dofs_all_vars = len(dumb_dofs)
 
-        self.num_nodes_cumsum = onp.cumsum([0] + [fe.num_nodes for fe in self.fes])
+        self.num_nodes_cumsum = np.cumsum(np.array([0] + [fe.num_nodes for fe in self.fes]))
         # (num_cells, num_vars, num_quads)
-        self.JxW = onp.transpose(onp.stack([fe.JxW for fe in self.fes]), axes=(1, 0, 2))
+        self.JxW = np.transpose(np.stack([fe.JxW for fe in self.fes]), axes=(1, 0, 2))
         # (num_cells, num_quads, num_nodes +..., dim)
-        self.shape_grads = onp.concatenate([fe.shape_grads for fe in self.fes], axis=2)
+        self.shape_grads = np.concatenate([fe.shape_grads for fe in self.fes], axis=2)
         # (num_cells, num_quads, num_nodes + ..., 1, dim)
-        self.v_grads_JxW = onp.concatenate([fe.v_grads_JxW for fe in self.fes], axis=2)
+        self.v_grads_JxW = np.concatenate([fe.v_grads_JxW for fe in self.fes], axis=2)
 
-        # TODO: assert all vars quad points be the same
+        # Verify all variables have the same quadrature points
+        if len(self.fes) > 1:
+            ref_quad_points = self.fes[0].get_physical_quad_points()
+            for i, fe in enumerate(self.fes[1:], 1):
+                quad_points = fe.get_physical_quad_points()
+                assert np.allclose(ref_quad_points, quad_points), \
+                    f"Finite element space {i} has different quadrature points"
         # (num_cells, num_quads, dim)
         self.physical_quad_points = self.fes[0].get_physical_quad_points()
 
@@ -288,11 +273,11 @@ class Problem:
                 s_shape_vals.append(selected_face_shape_vals)
 
             # (num_selected_faces, num_face_quads, num_nodes + ..., dim)
-            s_shape_grads = onp.concatenate(s_shape_grads, axis=2)
+            s_shape_grads = np.concatenate(s_shape_grads, axis=2)
             # (num_selected_faces, num_vars, num_face_quads)
-            n_scale = onp.transpose(onp.stack(n_scale), axes=(1, 0, 2))
+            n_scale = np.transpose(np.stack(n_scale), axes=(1, 0, 2))
             # (num_selected_faces, num_face_quads, num_nodes + ...)
-            s_shape_vals = onp.concatenate(s_shape_vals, axis=2)
+            s_shape_vals = np.concatenate(s_shape_vals, axis=2)
             # (num_selected_faces, num_face_quads, dim)
             physical_surface_quad_points = self.fes[0].get_physical_surface_quad_points(
                 boundary_inds
@@ -301,11 +286,21 @@ class Problem:
             self.selected_face_shape_grads.append(s_shape_grads)
             self.nanson_scale.append(n_scale)
             self.selected_face_shape_vals.append(s_shape_vals)
-            # TODO: assert all vars face quad points be the same
+            # Verify all variables have the same face quadrature points
+            if len(self.fes) > 1:
+                ref_face_quad_points = self.fes[0].get_physical_quad_points_face(self.boundary_inds_list[ind])
+                for i, fe in enumerate(self.fes[1:], 1):
+                    other_quad_points = fe.get_physical_quad_points_face(self.boundary_inds_list[ind])
+                    assert np.allclose(ref_face_quad_points, other_quad_points), \
+                        f"Finite element space {i} has different face quadrature points for boundary {ind}"
             self.physical_surface_quad_points.append(physical_surface_quad_points)
 
         self.internal_vars = ()
         self.internal_vars_surfaces = [() for _ in range(len(self.boundary_inds_list))]
+        
+        # Initialize kernel generator
+        self.kernel_generator = KernelGenerator(self.fes, self.unflatten_fn_dof, self.dim)
+        
         self.custom_init(*self.additional_info)
         self.pre_jit_fns()
 
@@ -328,147 +323,41 @@ class Problem:
     def get_laplace_kernel(self, tensor_map: Callable) -> Callable:
         """Create a kernel function for Laplace-type (gradient-based) weak forms.
 
-        Generates a function that computes element-level contributions to the weak form
-        involving solution gradients, such as diffusion or elasticity terms.
+        Delegates to KernelGenerator for kernel creation.
 
         Args:
             tensor_map (Callable): Function that maps solution gradients to flux/stress.
-                Signature: tensor_map(u_grads, *internal_vars) -> flux
-                where u_grads has shape (num_quads, vec, dim).
 
         Returns:
-            Callable: Element kernel function with signature:
-                kernel(cell_sol_flat, cell_shape_grads, cell_v_grads_JxW, *internal_vars)
-                -> element_residual
+            Callable: Element kernel function for gradient-based weak forms.
         """
-
-        def laplace_kernel(
-            cell_sol_flat, cell_shape_grads, cell_v_grads_JxW, *cell_internal_vars
-        ):
-            # cell_sol_flat: (num_nodes*vec + ...,)
-            # cell_sol_list: [(num_nodes, vec), ...]
-            # cell_shape_grads: (num_quads, num_nodes + ..., dim)
-            # cell_v_grads_JxW: (num_quads, num_nodes + ..., 1, dim)
-
-            cell_sol_list = self.unflatten_fn_dof(cell_sol_flat)
-            cell_shape_grads = cell_shape_grads[:, : self.fes[0].num_nodes, :]
-            cell_sol = cell_sol_list[0]
-            cell_v_grads_JxW = cell_v_grads_JxW[:, : self.fes[0].num_nodes, :, :]
-            vec = self.fes[0].vec
-
-            # (1, num_nodes, vec, 1) * (num_quads, num_nodes, 1, dim) -> (num_quads, num_nodes, vec, dim)
-            u_grads = cell_sol[None, :, :, None] * cell_shape_grads[:, :, None, :]
-            u_grads = np.sum(u_grads, axis=1)  # (num_quads, vec, dim)
-            u_grads_reshape = u_grads.reshape(
-                -1, vec, self.dim
-            )  # (num_quads, vec, dim)
-            # (num_quads, vec, dim)
-            u_physics = jax.vmap(tensor_map)(
-                u_grads_reshape, *cell_internal_vars
-            ).reshape(u_grads.shape)
-            # (num_quads, num_nodes, vec, dim) -> (num_nodes, vec)
-            val = np.sum(u_physics[:, None, :, :] * cell_v_grads_JxW, axis=(0, -1))
-            val = jax.flatten_util.ravel_pytree(val)[0]  # (num_nodes*vec + ...,)
-            return val
-
-        return laplace_kernel
+        return self.kernel_generator.get_laplace_kernel(tensor_map)
 
     def get_mass_kernel(self, mass_map: Callable) -> Callable:
         """Create a kernel function for mass-type (solution-based) weak forms.
 
-        Generates a function that computes element-level contributions to the weak form
-        involving solution values, such as reaction terms or time derivatives.
+        Delegates to KernelGenerator for kernel creation.
 
         Args:
             mass_map (Callable): Function that maps solution values to source terms.
-                Signature: mass_map(u, x, *internal_vars) -> source
-                where u has shape (num_quads, vec) and x has shape (num_quads, dim).
 
         Returns:
-            Callable: Element kernel function with signature:
-                kernel(cell_sol_flat, x, cell_JxW, *internal_vars) -> element_residual
+            Callable: Element kernel function for mass-type weak forms.
         """
-
-        def mass_kernel(cell_sol_flat, x, cell_JxW, *cell_internal_vars):
-            # cell_sol_flat: (num_nodes*vec + ...,)
-            # cell_sol_list: [(num_nodes, vec), ...]
-            # x: (num_quads, dim)
-            # cell_JxW: (num_vars, num_quads)
-
-            cell_sol_list = self.unflatten_fn_dof(cell_sol_flat)
-            cell_sol = cell_sol_list[0]
-            cell_JxW = cell_JxW[0]
-            vec = self.fes[0].vec
-            # (1, num_nodes, vec) * (num_quads, num_nodes, 1) -> (num_quads, num_nodes, vec) -> (num_quads, vec)
-            u = np.sum(
-                cell_sol[None, :, :] * self.fes[0].shape_vals[:, :, None], axis=1
-            )
-            u_physics = jax.vmap(mass_map)(
-                u, x, *cell_internal_vars
-            )  # (num_quads, vec)
-            # (num_quads, 1, vec) * (num_quads, num_nodes, 1) * (num_quads, 1, 1) -> (num_nodes, vec)
-            val = np.sum(
-                u_physics[:, None, :]
-                * self.fes[0].shape_vals[:, :, None]
-                * cell_JxW[:, None, None],
-                axis=0,
-            )
-            val = jax.flatten_util.ravel_pytree(val)[0]  # (num_nodes*vec + ...,)
-            return val
-
-        return mass_kernel
+        return self.kernel_generator.get_mass_kernel(mass_map)
 
     def get_surface_kernel(self, surface_map: Callable) -> Callable:
         """Create a kernel function for surface integral weak forms.
 
-        Generates a function that computes face-level contributions to the weak form,
-        such as Neumann boundary conditions or interface terms.
+        Delegates to KernelGenerator for kernel creation.
 
         Args:
             surface_map (Callable): Function that maps surface solution values to fluxes.
-                Signature: surface_map(u, x, *internal_vars) -> flux
-                where u has shape (num_face_quads, vec) and x has shape (num_face_quads, dim).
 
         Returns:
-            Callable: Surface kernel function with signature:
-                kernel(cell_sol_flat, x, face_shape_vals, face_shape_grads,
-                       face_nanson_scale, *internal_vars) -> face_residual
+            Callable: Surface kernel function for boundary/interface terms.
         """
-
-        def surface_kernel(
-            cell_sol_flat,
-            x,
-            face_shape_vals,
-            face_shape_grads,
-            face_nanson_scale,
-            *cell_internal_vars_surface,
-        ):
-            # face_shape_vals: (num_face_quads, num_nodes + ...)
-            # face_shape_grads: (num_face_quads, num_nodes + ..., dim)
-            # x: (num_face_quads, dim)
-            # face_nanson_scale: (num_vars, num_face_quads)
-
-            cell_sol_list = self.unflatten_fn_dof(cell_sol_flat)
-            cell_sol = cell_sol_list[0]
-            face_shape_vals = face_shape_vals[:, : self.fes[0].num_nodes]
-            face_nanson_scale = face_nanson_scale[0]
-
-            # (1, num_nodes, vec) * (num_face_quads, num_nodes, 1) -> (num_face_quads, vec)
-            u = np.sum(cell_sol[None, :, :] * face_shape_vals[:, :, None], axis=1)
-            u_physics = jax.vmap(surface_map)(
-                u, x, *cell_internal_vars_surface
-            )  # (num_face_quads, vec)
-            # (num_face_quads, 1, vec) * (num_face_quads, num_nodes, 1) * (num_face_quads, 1, 1) -> (num_nodes, vec)
-            val = np.sum(
-                u_physics[:, None, :]
-                * face_shape_vals[:, :, None]
-                * face_nanson_scale[:, None, None],
-                axis=0,
-            )
-
-            return jax.flatten_util.ravel_pytree(val)[0]
-
-        return surface_kernel
+        return self.kernel_generator.get_surface_kernel(surface_map)
 
     def pre_jit_fns(self) -> None:
         """Prepare and JIT-compile kernel functions for efficient computation.
@@ -661,7 +550,7 @@ class Problem:
         Args:
             cells_sol_flat (np.ndarray): Flattened cell solution data with shape
                 (num_cells, num_nodes*vec + ...).
-            np_version: NumPy backend (np for JAX, onp for standard NumPy).
+            np_version: NumPy backend (np for JAX).
             jac_flag (bool): Whether to compute Jacobians in addition to residuals.
             internal_vars (tuple): Additional internal variables for the computation.
 
@@ -670,67 +559,22 @@ class Problem:
                 (num_cells, num_nodes*vec + ...). If jac_flag=True, also returns
                 Jacobians with shape (num_cells, num_nodes*vec + ..., num_nodes*vec + ...).
         """
-        vmap_fn = self.kernel_jac if jac_flag else self.kernel
-        num_cuts = 20
-        if num_cuts > self.num_cells:
-            num_cuts = self.num_cells
-        batch_size = self.num_cells // num_cuts
-        input_collection = [
-            cells_sol_flat,
-            self.physical_quad_points,
-            self.shape_grads,
-            self.JxW,
-            self.v_grads_JxW,
-            *internal_vars,
-        ]
-
-        if jac_flag:
-            values = []
-            jacs = []
-            for i in range(num_cuts):
-                if i < num_cuts - 1:
-                    input_col = jax.tree_map(
-                        lambda x: x[i * batch_size : (i + 1) * batch_size],
-                        input_collection,
-                    )
-                else:
-                    input_col = jax.tree_map(
-                        lambda x: x[i * batch_size :], input_collection
-                    )
-
-                val, jac = vmap_fn(*input_col)
-                values.append(val)
-                jacs.append(jac)
-            # Handle traced arrays during vmap/autodiff by using JAX operations
-            if values and hasattr(values[0], '_trace'):
-                values = np.vstack(values)
-                jacs = np.vstack(jacs) if jacs else jacs
-            else:
-                values = np_version.vstack(values)
-                jacs = np_version.vstack(jacs)
-
-            return values, jacs
-        else:
-            values = []
-            for i in range(num_cuts):
-                if i < num_cuts - 1:
-                    input_col = jax.tree_map(
-                        lambda x: x[i * batch_size : (i + 1) * batch_size],
-                        input_collection,
-                    )
-                else:
-                    input_col = jax.tree_map(
-                        lambda x: x[i * batch_size :], input_collection
-                    )
-
-                val = vmap_fn(*input_col)
-                values.append(val)
-            # Handle traced arrays during vmap/autodiff by using JAX operations
-            if values and hasattr(values[0], '_trace'):
-                values = np.vstack(values)
-            else:
-                values = np_version.vstack(values)
-            return values
+        kernel = self.kernel_jac if jac_flag else self.kernel
+        kernel_jac = self.kernel_jac if jac_flag else None
+        
+        return AssemblyManager.split_and_compute_cell(
+            cells_sol_flat=cells_sol_flat,
+            kernel=kernel,
+            kernel_jac=kernel_jac,
+            physical_quad_points=self.physical_quad_points,
+            shape_grads=self.shape_grads,
+            JxW=self.JxW,
+            v_grads_JxW=self.v_grads_JxW,
+            internal_vars=internal_vars,
+            jac_flag=jac_flag,
+            num_cells=self.num_cells,
+            np_version=np_version
+        )
 
     def compute_face(
         self, cells_sol_flat, np_version, jac_flag, internal_vars_surfaces
@@ -743,7 +587,7 @@ class Problem:
         Args:
             cells_sol_flat (np.ndarray): Flattened cell solution data with shape
                 (num_cells, num_nodes*vec + ...).
-            np_version: NumPy backend (np for JAX, onp for standard NumPy).
+            np_version: NumPy backend (np for JAX).
             jac_flag (bool): Whether to compute Jacobians in addition to residuals.
             internal_vars_surfaces (List[tuple]): Internal variables for each surface subdomain.
 
@@ -752,46 +596,19 @@ class Problem:
                 List of face residuals for each boundary subdomain. If jac_flag=True,
                 also returns list of face Jacobians.
         """
-        if jac_flag:
-            values = []
-            jacs = []
-            for i, boundary_inds in enumerate(self.boundary_inds_list):
-                vmap_fn = self.kernel_jac_face[i]
-                selected_cell_sols_flat = cells_sol_flat[
-                    boundary_inds[:, 0]
-                ]  # (num_selected_faces, num_nodes*vec + ...))
-                input_collection = [
-                    selected_cell_sols_flat,
-                    self.physical_surface_quad_points[i],
-                    self.selected_face_shape_vals[i],
-                    self.selected_face_shape_grads[i],
-                    self.nanson_scale[i],
-                    *internal_vars_surfaces[i],
-                ]
-
-                val, jac = vmap_fn(*input_collection)
-                values.append(val)
-                jacs.append(jac)
-            return values, jacs
-        else:
-            values = []
-            for i, boundary_inds in enumerate(self.boundary_inds_list):
-                vmap_fn = self.kernel_face[i]
-                selected_cell_sols_flat = cells_sol_flat[
-                    boundary_inds[:, 0]
-                ]  # (num_selected_faces, num_nodes*vec + ...))
-                # TODO: duplicated code
-                input_collection = [
-                    selected_cell_sols_flat,
-                    self.physical_surface_quad_points[i],
-                    self.selected_face_shape_vals[i],
-                    self.selected_face_shape_grads[i],
-                    self.nanson_scale[i],
-                    *internal_vars_surfaces[i],
-                ]
-                val = vmap_fn(*input_collection)
-                values.append(val)
-            return values
+        return AssemblyManager.compute_face(
+            cells_sol_flat=cells_sol_flat,
+            kernel_face=self.kernel_face,
+            kernel_jac_face=self.kernel_jac_face,
+            boundary_inds_list=self.boundary_inds_list,
+            physical_surface_quad_points=self.physical_surface_quad_points,
+            selected_face_shape_vals=self.selected_face_shape_vals,
+            selected_face_shape_grads=self.selected_face_shape_grads,
+            nanson_scale=self.nanson_scale,
+            internal_vars_surfaces=internal_vars_surfaces,
+            jac_flag=jac_flag,
+            np_version=np_version
+        )
 
     def compute_residual_vars_helper(self, weak_form_flat: List[np.ndarray], weak_form_face_flat: List[np.ndarray]) -> Tuple[List[np.ndarray], List[np.ndarray]]:
         """Assemble global residual from element and face contributions.
@@ -808,29 +625,14 @@ class Problem:
         Returns:
             List[np.ndarray]: Global residual vectors for each variable.
         """
-        res_list = [np.zeros((fe.num_total_nodes, fe.vec)) for fe in self.fes]
-        weak_form_list = jax.vmap(lambda x: self.unflatten_fn_dof(x))(
-            weak_form_flat
-        )  # [(num_cells, num_nodes, vec), ...]
-        res_list = [
-            res_list[i]
-            .at[self.cells_list[i].reshape(-1)]
-            .add(weak_form_list[i].reshape(-1, self.fes[i].vec))
-            for i in range(self.num_vars)
-        ]
-
-        for ind, cells_list_face in enumerate(self.cells_list_face_list):
-            weak_form_face_list = jax.vmap(lambda x: self.unflatten_fn_dof(x))(
-                weak_form_face_flat[ind]
-            )  # [(num_selected_faces, num_nodes, vec), ...]
-            res_list = [
-                res_list[i]
-                .at[cells_list_face[i].reshape(-1)]
-                .add(weak_form_face_list[i].reshape(-1, self.fes[i].vec))
-                for i in range(self.num_vars)
-            ]
-
-        return res_list
+        return AssemblyManager.compute_residual_vars_helper(
+            weak_form_flat=weak_form_flat,
+            weak_form_face_flat=weak_form_face_flat,
+            fes=self.fes,
+            unflatten_fn_dof=self.unflatten_fn_dof,
+            cells_list=self.cells_list,
+            cells_list_face_list=self.cells_list_face_list
+        )
 
     def compute_residual_vars(self, sol_list: List[np.ndarray], internal_vars: List[Any], internal_vars_surfaces: List[Any]) -> Tuple[List[np.ndarray], List[Any], List[Any]]:
         """Compute residual vectors with specified internal variables.
@@ -885,20 +687,20 @@ class Problem:
         )  # (num_cells, num_nodes*vec + ...)
         # (num_cells, num_nodes*vec + ...),  (num_cells, num_nodes*vec + ..., num_nodes*vec + ...)
         weak_form_flat, cells_jac_flat = self.split_and_compute_cell(
-            cells_sol_flat, onp, True, internal_vars
+            cells_sol_flat, np, True, internal_vars
         )
         # Handle traced arrays during vmap/autodiff
         if hasattr(cells_jac_flat, '_trace'):
             self.V = cells_jac_flat.reshape(-1)  # Keep as JAX array for traced computation
         else:
-            self.V = onp.array(cells_jac_flat.reshape(-1))
+            self.V = np.array(cells_jac_flat.reshape(-1))
 
         # [(num_selected_faces, num_nodes*vec + ...,), ...], [(num_selected_faces, num_nodes*vec + ..., num_nodes*vec + ...,), ...]
         weak_form_face_flat, cells_jac_face_flat = self.compute_face(
-            cells_sol_flat, onp, True, internal_vars_surfaces
+            cells_sol_flat, np, True, internal_vars_surfaces
         )
         for cells_jac_f_flat in cells_jac_face_flat:
-            self.V = onp.hstack((self.V, onp.array(cells_jac_f_flat.reshape(-1))))
+            self.V = np.hstack((self.V, np.array(cells_jac_f_flat.reshape(-1))))
 
         return self.compute_residual_vars_helper(weak_form_flat, weak_form_face_flat)
 
@@ -981,39 +783,120 @@ class Problem:
             with element Jacobian data. The resulting sparse matrix is stored in
             self.csr_array.
         """
-        logger.debug(f"Creating sparse matrix with scipy...")
         if not hasattr(self, "V"):
             raise ValueError(
                 "You must call newton_update() before computing the CSR matrix."
             )
 
-        if chunk_size is not None:
-            if chunk_size <= 0:
-                raise ValueError("chunk_size must be a positive integer.")
+        self.csr_array = AssemblyManager.compute_csr(
+            V=self.V,
+            I=self.I,
+            J=self.J,
+            num_total_dofs_all_vars=self.num_total_dofs_all_vars,
+            chunk_size=chunk_size
+        )
 
-            num_chunks = (self.V.shape[0] + chunk_size - 1) // chunk_size
-            csr_shape = (self.num_total_dofs_all_vars, self.num_total_dofs_all_vars)
-            csr_total = scipy.sparse.csr_matrix(csr_shape)
+    def precompute_bc_data(self) -> dict:
+        """Pre-compute boundary condition data for efficient JIT compilation.
+        
+        This method extracts all boundary condition information from the finite element
+        spaces and converts it to JAX-compatible arrays. This separation allows the
+        boundary condition processing (which uses non-JIT operations like np.argwhere)
+        to be done once during setup, while the actual application can be JIT-compiled.
+        
+        Returns:
+            dict: Dictionary containing boundary condition data.
+                
+        Note:
+            This method delegates to BoundaryConditionManager.precompute_bc_data().
+        """
+        return BoundaryConditionManager.precompute_bc_data(self.fes, self.offset)
 
-            for i in range(num_chunks):
-                V_chunk = self.V[i * chunk_size : (i + 1) * chunk_size]
-                I_chunk = self.I[i * chunk_size : (i + 1) * chunk_size]
-                J_chunk = self.J[i * chunk_size : (i + 1) * chunk_size]
-                logger.debug(f"Building chunk {i+1}/{num_chunks}, size={len(V_chunk)}")
+    def assemble(self, dofs: np.ndarray, bc_data: dict = None, prolongation_matrix: BCOO = None, 
+                macro_term: np.ndarray = None, apply_bcs: bool = True) -> tuple:
+        """Assemble the finite element system matrix and residual vector.
+        
+        This method performs the complete assembly of the finite element system
+        including residual computation, Jacobian matrix assembly, boundary condition
+        application, and handling of prolongation matrices and macro terms.
+        
+        Args:
+            dofs (np.ndarray): Current solution degrees of freedom vector.
+            bc_data (dict, optional): Boundary condition data from precompute_bc_data().
+                If None, uses problem's BC data. If no BCs exist, pass empty dict.
+            prolongation_matrix (BCOO, optional): Prolongation matrix for constraints.
+                If None, uses problem's prolongation matrix.
+            macro_term (np.ndarray, optional): Macro displacement term.
+                If None, uses problem's macro term.
+            apply_bcs (bool, optional): Whether to apply boundary conditions. Defaults to True.
+            
+        Returns:
+            tuple: (A, b) where:
+                - A: System matrix (BCOO sparse format) with BCs applied if requested
+                - b: Right-hand side vector with BCs applied if requested
+                
+        Note:
+            This method handles the complete assembly including non-JIT-compatible 
+            parts like sparse matrix construction and boundary condition application.
+            The resulting (A, b) can be passed directly to solver.solve().
+            
+        Example:
+            >>> bc_data = problem.precompute_bc_data()
+            >>> A, b = problem.assemble(dofs, bc_data)
+            >>> solution = solver.solve(A, b, solver_options)
+        """
+        from fealax.solver import get_A
+        
+        return AssemblyManager.assemble(
+            dofs=dofs,
+            fes=self.fes,
+            unflatten_fn_sol_list=self.unflatten_fn_sol_list,
+            newton_update_fn=self.newton_update,
+            compute_csr_fn=self.compute_csr,
+            get_A_fn=lambda: get_A(self),
+            precompute_bc_data_fn=self.precompute_bc_data,
+            apply_bcs_fn=self.apply_bcs_to_assembled_system,
+            bc_data=bc_data,
+            prolongation_matrix=prolongation_matrix if prolongation_matrix is not None else self.prolongation_matrix,
+            macro_term=macro_term if macro_term is not None else self.macro_term,
+            apply_bcs=apply_bcs
+        )
 
-                csr_chunk = scipy.sparse.csr_matrix(
-                    (onp.array(V_chunk), (onp.array(I_chunk), onp.array(J_chunk))),
-                    shape=csr_shape,
-                )
-                del V_chunk
-                del I_chunk
-                del J_chunk
-                gc.collect()
-                csr_total += csr_chunk
+    def assemble_system(self, dofs: np.ndarray) -> dict:
+        """Legacy method for backward compatibility.
+        
+        This method maintains the old interface for existing code while
+        using the new assemble() method internally.
+        
+        Args:
+            dofs (np.ndarray): Current solution degrees of freedom vector.
+            
+        Returns:
+            dict: Dictionary containing assembled system data.
+        """
+        return AssemblyManager.assemble_system(
+            dofs=dofs,
+            assemble_fn=self.assemble,
+            precompute_bc_data_fn=self.precompute_bc_data,
+            has_prolongation=self.prolongation_matrix is not None
+        )
 
-            self.csr_array = csr_total
-        else:
-            self.csr_array = scipy.sparse.csr_array(
-                (onp.array(self.V), (self.I, self.J)),
-                shape=(self.num_total_dofs_all_vars, self.num_total_dofs_all_vars),
-            )
+    def apply_bcs_to_assembled_system(self, A: BCOO, b: np.ndarray, bc_data: dict) -> tuple:
+        """Apply boundary conditions to an assembled finite element system.
+        
+        This method applies Dirichlet boundary conditions to the assembled system
+        matrix and right-hand side vector using the row elimination method. It uses
+        the precomputed boundary condition data to avoid non-JIT-compatible operations.
+        
+        Args:
+            A (BCOO): System matrix in JAX sparse format.
+            b (np.ndarray): Right-hand side vector.
+            bc_data (dict): Precomputed boundary condition data from precompute_bc_data().
+            
+        Returns:
+            tuple: (A_bc, b_bc) with boundary conditions applied.
+                
+        Note:
+            This method delegates to BoundaryConditionManager.apply_bcs_to_assembled_system().
+        """
+        return BoundaryConditionManager.apply_bcs_to_assembled_system(A, b, bc_data)
