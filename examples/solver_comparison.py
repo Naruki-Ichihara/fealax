@@ -182,7 +182,7 @@ def main():
         'tol': 1e-5,  # Further relaxed tolerance
         'method': 'bicgstab',  # Linear solver method
         'precond': True,  # Enable preconditioning
-        'use_jit': False  # Disable JIT for this example
+        # JIT compilation is always enabled (this was a debugging example)
     }
     
     print("Solving linear elasticity problem with new separated API...")

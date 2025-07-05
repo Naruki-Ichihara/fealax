@@ -1,48 +1,44 @@
 """Newton solver wrapper providing clean API for JAX automation chains.
 
 This module provides a wrapper class that encapsulates the Newton solver functionality
-with a clean `.solve()` interface that's compatible with JAX transformations.
-The wrapper supports both regular and automatic differentiation modes.
+with a clean `.solve()` interface that's always differentiable through JAX transformations.
 
 Example:
     Basic usage:
     >>> solver = NewtonSolver(problem, solver_options)
     >>> solution = solver.solve(params)
     
-    In JAX automation chain:
-    >>> solver = NewtonSolver(problem, solver_options, differentiable=True)
+    With automatic differentiation:
     >>> objective = lambda params: compute_objective(solver.solve(params))
     >>> gradients = jax.grad(objective)(params)
 """
 
 import jax
 import jax.numpy as np
-from typing import Dict, List, Any, Callable
+from typing import Dict, List, Any
 from fealax import logger
-from .newton_solvers import newton_solve
 from .solver_utils import _ad_wrapper
 
 
 class NewtonSolver:
     """Newton solver wrapper with clean API for JAX automation chains.
     
-    This class provides a wrapper around the Newton solver that supports both
-    regular solving and automatic differentiation through JAX transformations.
+    This class provides a wrapper around the Newton solver that is always
+    differentiable through JAX transformations. The solver automatically
+    supports gradient computation without any special configuration and
+    uses JIT compilation for optimal performance.
     
     Args:
         problem: Finite element problem instance
         solver_options: Configuration options for the Newton solver
-        differentiable: If True, creates a differentiable solver using ad_wrapper
-        adjoint_solver_options: Configuration for adjoint solver (if differentiable=True)
-        use_jit: Enable JIT compilation for better performance
+        adjoint_solver_options: Configuration for adjoint solver (defaults to solver_options)
         
     Example:
         Basic solver usage:
         >>> solver = NewtonSolver(problem, {'tol': 1e-6})
         >>> solution = solver.solve(params)
         
-        Differentiable solver for optimization:
-        >>> solver = NewtonSolver(problem, {'tol': 1e-6}, differentiable=True)
+        With automatic differentiation:
         >>> objective = lambda p: compute_objective(solver.solve(p))
         >>> gradients = jax.grad(objective)(params)
     """
@@ -51,51 +47,21 @@ class NewtonSolver:
         self,
         problem: Any,
         solver_options: Dict[str, Any] = {},
-        differentiable: bool = False,
-        adjoint_solver_options: Dict[str, Any] = {},
-        use_jit: bool = False
+        adjoint_solver_options: Dict[str, Any] = None
     ):
         self.problem = problem
         self.solver_options = solver_options.copy()
-        self.differentiable = differentiable
-        self.adjoint_solver_options = adjoint_solver_options
-        self.use_jit = use_jit
+        # If no adjoint options provided, use the same as forward solver
+        self.adjoint_solver_options = adjoint_solver_options if adjoint_solver_options is not None else solver_options.copy()
         
-        # Create the appropriate solver function
-        if differentiable:
-            logger.debug("Creating differentiable Newton solver")
-            self._solve_fn = _ad_wrapper(
-                problem, 
-                solver_options, 
-                adjoint_solver_options, 
-                use_jit
-            )
-        else:
-            logger.debug("Creating standard Newton solver")
-            self._solve_fn = self._create_standard_solver()
+        # Create the differentiable solver function with JIT always enabled
+        logger.debug("Creating differentiable Newton solver with JIT compilation")
+        self._solve_fn = _ad_wrapper(
+            problem, 
+            solver_options, 
+            self.adjoint_solver_options
+        )
     
-    def _create_standard_solver(self) -> Callable[[Any], List[np.ndarray]]:
-        """Create standard (non-differentiable) solver function."""
-        def solver_fn(params):
-            # Set parameters on the problem
-            self.problem.set_params(params)
-            
-            # Choose solver based on options
-            if self.solver_options.get('use_jit', False) or self.use_jit:
-                # Use JIT-compatible solver
-                jit_options = self.solver_options.copy()
-                jit_options['use_jit'] = True
-                return newton_solve(self.problem, jit_options)
-            else:
-                # Use regular solver  
-                return newton_solve(self.problem, self.solver_options)
-        
-        # Optionally JIT-compile the solver
-        if self.use_jit and not self.differentiable:
-            logger.debug("JIT-compiling standard solver")
-            return jax.jit(solver_fn)
-        else:
-            return solver_fn
     
     def solve(self, params: Any) -> List[np.ndarray]:
         """Solve the finite element problem with given parameters.
@@ -109,6 +75,10 @@ class NewtonSolver:
         Example:
             >>> solution = solver.solve(material_params)
             >>> displacement = solution[0]  # First variable (e.g., displacement)
+            
+            With gradients:
+            >>> grad_fn = jax.grad(lambda p: jnp.sum(solver.solve(p)[0]))
+            >>> gradients = grad_fn(material_params)
         """
         return self._solve_fn(params)
     
@@ -124,128 +94,129 @@ class NewtonSolver:
         self.solver_options.update(new_options)
         
         # Recreate solver function with new options
-        if self.differentiable:
-            self._solve_fn = _ad_wrapper(
-                self.problem, 
-                self.solver_options, 
-                self.adjoint_solver_options, 
-                self.use_jit
-            )
-        else:
-            self._solve_fn = self._create_standard_solver()
+        self._solve_fn = _ad_wrapper(
+            self.problem, 
+            self.solver_options, 
+            self.adjoint_solver_options
+        )
     
     def update_adjoint_options(self, new_options: Dict[str, Any]):
-        """Update adjoint solver options (only for differentiable solvers).
+        """Update adjoint solver options.
         
         Args:
             new_options: New adjoint solver configuration options
-            
-        Raises:
-            ValueError: If solver is not differentiable
         """
-        if not self.differentiable:
-            raise ValueError("Cannot update adjoint options for non-differentiable solver")
-        
         self.adjoint_solver_options.update(new_options)
         
-        # Recreate differentiable solver function
-        self._solve_fn = _ad_wrapper_legacy(
+        # Recreate solver function with new adjoint options
+        self._solve_fn = _ad_wrapper(
             self.problem, 
             self.solver_options, 
-            self.adjoint_solver_options, 
-            self.use_jit
+            self.adjoint_solver_options
         )
-    
-    def make_differentiable(self, adjoint_solver_options: Dict[str, Any] = {}):
-        """Convert to differentiable solver.
-        
-        Args:
-            adjoint_solver_options: Configuration for adjoint solver
-            
-        Note:
-            This recreates the solver as a differentiable version.
-        """
-        if self.differentiable:
-            logger.warning("Solver is already differentiable")
-            return
-        
-        self.differentiable = True
-        self.adjoint_solver_options = adjoint_solver_options
-        
-        # Recreate as differentiable solver
-        self._solve_fn = _ad_wrapper_legacy(
-            self.problem, 
-            self.solver_options, 
-            self.adjoint_solver_options, 
-            self.use_jit
-        )
-        
-        logger.debug("Converted to differentiable solver")
-    
-    def make_non_differentiable(self):
-        """Convert to non-differentiable solver.
-        
-        Note:
-            This recreates the solver as a standard (non-differentiable) version.
-        """
-        if not self.differentiable:
-            logger.warning("Solver is already non-differentiable")
-            return
-        
-        self.differentiable = False
-        
-        # Recreate as standard solver
-        self._solve_fn = self._create_standard_solver()
-        
-        logger.debug("Converted to non-differentiable solver")
-    
-    @property
-    def is_differentiable(self) -> bool:
-        """Check if solver is differentiable."""
-        return self.differentiable
     
     @property
     def is_jit_compiled(self) -> bool:
         """Check if solver uses JIT compilation."""
-        return self.use_jit or self.solver_options.get('use_jit', False)
+        return True  # Always JIT compiled
+    
+    def solve_batch(self, params_batch: List[Dict[str, Any]]) -> List[List[np.ndarray]]:
+        """Solve for a batch of parameter sets using sequential solving.
+        
+        Args:
+            params_batch: List of parameter dictionaries
+            
+        Returns:
+            List of solution lists, one for each parameter set
+            
+        Example:
+            >>> param_batch = [{'E': 200e9, 'nu': 0.3}, {'E': 300e9, 'nu': 0.25}]
+            >>> solutions = solver.solve_batch(param_batch)
+        """
+        if not params_batch:
+            return []
+        
+        logger.info(f"Using sequential solver for batch of {len(params_batch)} parameter sets")
+        # Use sequential solving with existing solver
+        solutions = []
+        for params in params_batch:
+            solution = self.solve(params)
+            solutions.append(solution)
+        return solutions
+    
+    def solve_parameter_sweep(
+        self, 
+        param_name: str, 
+        param_values: List[float], 
+        base_params: Dict[str, Any] = {}
+    ) -> Dict[str, Any]:
+        """Convenient parameter sweep for a single parameter.
+        
+        Args:
+            param_name: Name of parameter to sweep
+            param_values: List of values for the parameter
+            base_params: Base parameter dictionary (other fixed parameters)
+            
+        Returns:
+            Dictionary with parameter values, solutions, and analysis
+        """
+        # Create parameter batch
+        param_batch = []
+        for value in param_values:
+            params = base_params.copy()
+            params[param_name] = value
+            param_batch.append(params)
+        
+        # Solve batch
+        solutions = self.solve_batch(param_batch)
+        
+        # Analyze results  
+        max_displacements = []
+        for solution in solutions:
+            displacement = solution[0]  # Assume first variable is displacement
+            max_disp = float(np.max(np.abs(displacement)))
+            max_displacements.append(max_disp)
+        
+        return {
+            'parameter_name': param_name,
+            'parameter_values': param_values,
+            'solutions': solutions,
+            'max_displacements': max_displacements
+        }
 
 
 # Convenience function for creating solver instances
 def create_newton_solver(
     problem: Any,
     solver_options: Dict[str, Any] = {},
-    differentiable: bool = False,
-    adjoint_solver_options: Dict[str, Any] = {},
-    use_jit: bool = False
+    adjoint_solver_options: Dict[str, Any] = None,
+    differentiable: bool = None  # Deprecated parameter for backward compatibility
 ) -> NewtonSolver:
     """Create a Newton solver instance with specified configuration.
+    
+    The solver is always differentiable and supports automatic differentiation
+    through JAX transformations. JIT compilation is always enabled for optimal
+    performance.
     
     Args:
         problem: Finite element problem instance
         solver_options: Configuration options for the Newton solver
-        differentiable: If True, creates a differentiable solver
-        adjoint_solver_options: Configuration for adjoint solver
-        use_jit: Enable JIT compilation
+        adjoint_solver_options: Configuration for adjoint solver (defaults to solver_options)
+        differentiable: Deprecated - kept for backward compatibility
         
     Returns:
         Configured NewtonSolver instance
         
     Example:
-        Standard solver:
+        Create solver:
         >>> solver = create_newton_solver(problem, {'tol': 1e-6})
-        
-        Differentiable solver with JIT:
-        >>> solver = create_newton_solver(
-        ...     problem, 
-        ...     {'tol': 1e-6}, 
-        ...     differentiable=True, 
-        ...     use_jit=True
-        ... )
+        >>> solution = solver.solve(params)
     """
+    if differentiable is not None:
+        logger.warning("The 'differentiable' parameter is deprecated. NewtonSolver is always differentiable.")
+    
     return NewtonSolver(
         problem=problem,
         solver_options=solver_options,
-        differentiable=differentiable,
-        adjoint_solver_options=adjoint_solver_options,
-        use_jit=use_jit
+        adjoint_solver_options=adjoint_solver_options
     )

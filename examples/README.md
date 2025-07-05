@@ -145,7 +145,7 @@ Tune solver behavior for your specific problem:
 solver_options = {
     'tol': 1e-6,           # Convergence tolerance
     'max_iter': 20,        # Maximum Newton iterations
-    'use_jit': True,       # Enable JIT compilation
+    # JIT compilation is always enabled for optimal performance
     'precond': True,       # Use preconditioning
     'line_search': True    # Enable line search
 }
@@ -176,7 +176,7 @@ solver_options = {
 
 1. **Out of memory errors**: Reduce mesh size or use `large_mesh_comparison.py` approach
 2. **Convergence problems**: Lower applied loads, enable line search, use softer materials
-3. **Slow performance**: Enable JIT compilation with `use_jit=True`
+3. **Slow performance**: JIT compilation is now always enabled for optimal performance
 4. **Import errors**: Verify fealax installation with `pip install -e .`
 
 ### Getting Help

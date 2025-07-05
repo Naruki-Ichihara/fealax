@@ -31,7 +31,7 @@ def estimate_memory_requirements(num_dofs: int, num_elements: int) -> Dict[str, 
     # Sparse matrix: assume ~100 non-zeros per row (for 3D hex elements)
     sparse_matrix_memory = num_dofs * 100 * 8 * 3  # indices + data, safety factor
     
-    # Element matrices during assembly (dense)
+    # Element matrices during assembly (parallel)
     element_dofs = 24  # HEX8 elements have 8 nodes * 3 DOFs
     element_matrix_memory = num_elements * element_dofs * element_dofs * 8
     
@@ -55,7 +55,7 @@ def compute_adaptive_chunk_size(num_elements: int, available_memory: int, safety
     
     # Memory per element during assembly (rough estimate)
     element_dofs = 24
-    memory_per_element = element_dofs * element_dofs * 8  # Dense element matrix
+    memory_per_element = element_dofs * element_dofs * 8  # Parallel element matrix
     
     # Number of elements that fit in target memory
     elements_per_chunk = max(1, target_memory // memory_per_element)
@@ -129,18 +129,18 @@ def create_memory_efficient_solver_options(problem_size: int) -> Dict[str, Any]:
     
     if problem_size < 100000:  # Small problems
         base_options.update({
-            'use_jit': True,
+            # JIT compilation is always enabled
             'max_iter': 20
         })
     elif problem_size < 500000:  # Medium problems
         base_options.update({
-            'use_jit': False,  # Reduce compilation memory overhead
+            # JIT is always enabled but memory is managed automatically
             'max_iter': 15,
             'line_search_flag': True  # Help convergence with fewer iterations
         })
     else:  # Large problems
         base_options.update({
-            'use_jit': False,
+            # JIT compilation is always enabled
             'max_iter': 10,
             'line_search_flag': True,
             'tol': 1e-4,  # More relaxed for very large problems

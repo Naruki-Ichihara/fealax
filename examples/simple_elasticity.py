@@ -16,11 +16,12 @@ Key features demonstrated:
 - Clean NewtonSolver wrapper with solver.solve(params) API
 - Parameter-driven material properties for sensitivity analysis
 - Boundary condition specification using lambda functions
-- JAX-compatible solver for optimization workflows
+- JAX-compatible solver for optimization workflows with automatic JIT compilation
 - Physical interpretation of results
 
 The example focuses on demonstrating the new wrapper API's simplicity and
 its compatibility with JAX automation chains for optimization and sensitivity analysis.
+All solvers automatically use JIT compilation for optimal performance.
 """
 
 import jax.numpy as jnp
@@ -28,32 +29,15 @@ import jax
 
 from fealax.mesh import box_mesh
 from fealax.problem import Problem, DirichletBC
-from fealax.solver import NewtonSolver, create_newton_solver
+from fealax.solver import NewtonSolver
 from fealax.utils import save_as_vtk
 
 
 def create_mesh(nx=15, ny=15, nz=15):
-    """Create a structured 1x1x1 box mesh.
-    
-    Args:
-        nx, ny, nz: Number of elements in each direction
-        
-    Returns:
-        Mesh object
-    """
     return box_mesh(nx, ny, nz, 1.0, 1.0, 1.0, ele_type="HEX8")
 
 
 def define_boundary_conditions():
-    """Define boundary conditions for compression test.
-    
-    Creates boundary conditions that constrain the bottom face and apply
-    compression on the top face, with symmetry conditions to prevent
-    rigid body motion.
-    
-    Returns:
-        List of DirichletBC objects
-    """
     bcs = []
     
     # Fix bottom face in z-direction (prevent vertical motion)
@@ -88,15 +72,7 @@ def define_boundary_conditions():
 
 
 class ElasticityProblem(Problem):
-    """Linear elasticity problem with parameterized material properties."""
-    
     def __init__(self, mesh, **kwargs):
-        """Initialize elasticity problem.
-        
-        Args:
-            mesh: Finite element mesh
-            **kwargs: Additional arguments passed to Problem base class
-        """
         # Material properties will be set via parameters
         self.E = None  # Young's modulus (Pa)
         self.nu = None  # Poisson's ratio
@@ -106,11 +82,6 @@ class ElasticityProblem(Problem):
         super().__init__(mesh=mesh, **kwargs)
     
     def set_params(self, params):
-        """Set material parameters and update derived properties.
-        
-        Args:
-            params: Dictionary with material parameters {'E': float, 'nu': float}
-        """
         self.E = params['E']
         self.nu = params['nu']
         
@@ -119,23 +90,7 @@ class ElasticityProblem(Problem):
         self.lam = self.E * self.nu / ((1.0 + self.nu) * (1.0 - 2.0 * self.nu))  # First Lame parameter
     
     def get_tensor_map(self):
-        """Return tensor map function for linear elasticity.
-        
-        Implements the linear elastic constitutive law relating strain to stress.
-        
-        Returns:
-            Function that maps displacement gradients to stress tensor
-        """
         def tensor_map(u_grads, *internal_vars):
-            """Compute stress tensor from displacement gradients.
-            
-            Args:
-                u_grads: Displacement gradients with shape (vec, dim)
-                        For 3D: (3, 3) - gradients at a single quadrature point
-                        
-            Returns:
-                Stress tensor with same shape as u_grads
-            """
             # Strain tensor (symmetric gradient): ε = 0.5 * (∇u + ∇u^T)
             strain = 0.5 * (u_grads + jnp.transpose(u_grads))
             
@@ -150,14 +105,12 @@ class ElasticityProblem(Problem):
 
 
 def main():
-    """Main function to setup and solve the elasticity problem."""
-    
     # Enable JAX 64-bit precision for better numerical accuracy
     jax.config.update("jax_enable_x64", True)
 
     # Create mesh
     print("Creating 1x1x1 box mesh...")
-    mesh = create_mesh(nx=50, ny=50, nz=50)
+    mesh = create_mesh(nx=10, ny=10, nz=10)
     
     # Define boundary conditions
     print("Setting up boundary conditions...")
@@ -176,16 +129,11 @@ def main():
         'tol': 1e-5,           # Convergence tolerance  
         'rel_tol': 1e-6,       # Relative convergence tolerance
         'max_iter': 10,        # Maximum Newton iterations
-        'method': 'cg',        # Linear solver method
-        'use_jit': True        # Enable for GPU acceleration
+        'method': 'bicgstab'  # Linear solver method
     }
     
     # Create Newton solver using the new wrapper API
-    print("Creating Newton solver...")
     solver = NewtonSolver(problem, solver_options)
-    
-    # Alternative: using convenience function
-    # solver = create_newton_solver(problem, solver_options)
     
     # Material properties (steel-like)
     material_params = {
@@ -193,8 +141,6 @@ def main():
         'nu': 0.3    # Poisson's ratio
     }
     
-    # Solve the problem using the new API
-    print("Solving elasticity problem...")
     solution = solver.solve(material_params)
         
     # Post-process results
@@ -237,7 +183,6 @@ def main():
     save_as_vtk(vtk_helper, vtk_filename, point_infos=point_data)
     
     print("Example completed successfully!")
-    print("Results saved to: simple_elasticity_results.vtu")
     
     return solver, material_params, solution
 
@@ -271,11 +216,12 @@ def demonstrate_optimization():
         'tol': 1e-4,
         'rel_tol': 1e-5,
         'max_iter': 5,
-        'use_jit': True
+        # JIT compilation is always enabled
     }
     
     # Create differentiable solver for optimization
-    diff_solver = NewtonSolver(problem, solver_options, differentiable=True)
+    # Note: All NewtonSolver instances are automatically differentiable
+    diff_solver = NewtonSolver(problem, solver_options)
     
     # Define objective function (compliance minimization)
     def compliance_objective(params):
@@ -316,19 +262,3 @@ def demonstrate_optimization():
 if __name__ == "__main__":
     # Run main elasticity example
     solver, material_params, solution = main()
-    
-    # Run optimization demonstration
-    try:
-        diff_solver = demonstrate_optimization()
-        print("\n" + "="*50)
-        print("ALL EXAMPLES COMPLETED SUCCESSFULLY!")
-        print("="*50)
-        print("✓ Standard solver: solver.solve(params)")
-        print("✓ Differentiable solver: jax.grad(objective)(params)")
-        print("✓ JAX automation chains working")
-        print("✓ Material parameter sensitivity computed")
-        
-    except Exception as e:
-        print(f"\nOptimization demo failed: {e}")
-        print("Standard solver example completed successfully.")
-        print("Optimization may require additional problem setup.")

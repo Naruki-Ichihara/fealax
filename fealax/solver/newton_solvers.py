@@ -37,7 +37,7 @@ Example:
     
     Using JIT compilation for better performance:
     
-    >>> solver_options = {'use_jit': True, 'tol': 1e-8}
+    >>> solver_options = {'tol': 1e-8}
     >>> solution = newton_solve(problem, solver_options)
 
 Note:
@@ -54,7 +54,7 @@ from typing import Dict, List, Optional, Callable, Union, Tuple, Any
 import gc
 
 from fealax import logger
-from .linear_solvers import linear_solver
+# linear_solver import removed - using solve() instead
 from .linear_algebra import jax_get_diagonal, zero_rows_jax, jax_matrix_multiply, array_to_jax_vec
 from .boundary_conditions import apply_bc_vec, apply_bc, assign_bc, copy_bc, get_flatten_fn, jit_apply_bc_vec
 from .jit_solvers import (
@@ -105,7 +105,8 @@ def linear_incremental_solver(problem: Any, res_vec: np.ndarray, A: BCOO, dofs: 
         x0_2 = copy_bc(dofs, problem)
         x0 = x0_1 - x0_2
 
-    inc = linear_solver(A, b, x0, solver_options)
+    from .linear_solvers import solve
+    inc = solve(A, b, solver_options)
 
     line_search_flag = (
         solver_options["line_search_flag"]
@@ -400,339 +401,20 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
     return sol_list
 
 
-def _solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:
-    """[LEGACY] Solve nonlinear finite element problem using Newton-Raphson method.
-    
-    This is the conventional/legacy solver implementation. For new code, use newton_solve() instead.
-    
-    Main nonlinear solver that implements Newton-Raphson iteration with multiple
-    linear solver backends. Enforces Dirichlet boundary conditions via row 
-    elimination method and supports advanced features like line search, 
-    prolongation matrices, and macro terms.
-    
-    Args:
-        problem (Problem): Finite element problem instance containing mesh,
-            finite elements, and boundary conditions.
-        solver_options (dict, optional): Solver configuration dictionary. Defaults to {}.
-            Supported keys:
-            - 'jax_solver': JAX iterative solver options
-                - 'precond' (bool): Enable Jacobi preconditioning. Defaults to True.
-            - 'jax_sparse_solver': JAX sparse direct solver options (empty dict)
-            - 'jax_iterative_solver': JAX iterative solver options
-                - 'solver_type' (str): Krylov method ('bicgstab', 'cg'). Defaults to 'bicgstab'.
-                - 'precond_type' (str): Preconditioner ('jacobi', 'none'). Defaults to 'jacobi'.
-            - 'line_search_flag' (bool): Enable line search optimization. Defaults to False.
-            - 'initial_guess' (List[np.ndarray]): Initial solution guess. Same shape as output.
-            - 'tol' (float): Absolute tolerance for residual L2 norm. Defaults to 1e-6.
-            - 'rel_tol' (float): Relative tolerance for residual L2 norm. Defaults to 1e-8.
-            
-    Returns:
-        List[np.ndarray]: Solution list where each array corresponds to a variable.
-            For multi-variable problems, returns [u1, u2, ...] where each ui has
-            shape (num_nodes, vec_components).
-            
-    Raises:
-        AssertionError: If residual contains NaN values or solver fails to converge.
-        
-    Note:
-        Boundary Condition Enforcement:
-        Uses row elimination method where the residual becomes:
-        res(u) = D*r(u) + (I - D)*u - u_b
-        
-        Where:
-        - D: Diagonal matrix with zeros at constrained DOFs
-        - r(u): Physical residual from weak form
-        - u_b: Prescribed boundary values
-        
-        The Jacobian matrix is modified accordingly:
-        A = d(res)/d(u) = D*dr/du + (I - D)
-        
-        Solver Selection:
-        If no solver is specified, JAX solver is used by default.
-        Only one solver type should be specified per call.
-        
-    Example:
-        Basic nonlinear solve with JAX solver:
-        
-        >>> solver_options = {'jax_solver': {'precond': True}}
-        >>> solution = _solver(problem, solver_options)
-        
-        JAX iterative solver with custom tolerances:
-        
-        >>> options = {
-        ...     'jax_iterative_solver': {'solver_type': 'bicgstab', 'precond_type': 'jacobi'},
-        ...     'tol': 1e-8,
-        ...     'rel_tol': 1e-10
-        ... }
-        >>> solution = _solver(problem, options)
-        
-        With initial guess and line search:
-        
-        >>> options = {
-        ...     'jax_sparse_solver': {},
-        ...     'initial_guess': initial_solution,
-        ...     'line_search_flag': True
-        ... }
-        >>> solution = _solver(problem, options)
-    """
-    logger.debug(f"Calling the row elimination solver for imposing Dirichlet B.C.")
-    logger.debug("Start timing")
-    start = time.time()
-
-    if "initial_guess" in solver_options:
-        # We dont't want inititual guess to play a role in the differentiation chain.
-        initial_guess = jax.lax.stop_gradient(solver_options["initial_guess"])
-        dofs = jax.flatten_util.ravel_pytree(initial_guess)[0]
-
-    else:
-        if problem.prolongation_matrix is not None:
-            dofs = np.zeros(problem.prolongation_matrix.shape[1])  # reduced dofs
-        else:
-            dofs = np.zeros(problem.num_total_dofs_all_vars)
-            # Apply boundary conditions to initial guess for better convergence
-            dofs = assign_bc(dofs, problem)
-
-    rel_tol = solver_options["rel_tol"] if "rel_tol" in solver_options else 1e-8
-    tol = solver_options["tol"] if "tol" in solver_options else 1e-6
-
-    def newton_update_helper(dofs):
-        if problem.prolongation_matrix is not None:
-            logger.debug(
-                f"Using prolongation_matrix, shape = {problem.prolongation_matrix.shape}"
-            )
-            dofs = problem.prolongation_matrix @ dofs
-
-        sol_list = problem.unflatten_fn_sol_list(dofs)
-        res_list = problem.newton_update(sol_list)
-        res_vec = jax.flatten_util.ravel_pytree(res_list)[0]
-        res_vec = apply_bc_vec(res_vec, dofs, problem)
-
-        problem.compute_csr(CHUNK_SIZE)  # Ensure CSR matrix is computed
-
-        if problem.prolongation_matrix is not None:
-            res_vec = problem.prolongation_matrix.T @ res_vec
-
-        A_result = get_A(problem)
-        if problem.prolongation_matrix is not None:
-            A, A_reduced = A_result
-        else:
-            A = A_result
-            A_reduced = A
-
-        if problem.macro_term is not None:
-            macro_term_jax = array_to_jax_vec(problem.macro_term, A.shape[0])
-            K_affine_vec = A @ macro_term_jax
-            del A
-            gc.collect()
-            affine_force = problem.prolongation_matrix.T @ K_affine_vec
-            res_vec += affine_force
-
-        return res_vec, A_reduced
-
-    res_vec, A = newton_update_helper(dofs)
-    res_val = np.linalg.norm(res_vec)
-    res_val_initial = res_val
-    rel_res_val = res_val / res_val_initial
-    logger.debug(f"Before, l_2 res = {res_val}, relative l_2 res = {rel_res_val}")
-
-    while (rel_res_val > rel_tol) and (res_val > tol):
-        dofs = linear_incremental_solver(problem, res_vec, A, dofs, solver_options)
-        res_vec, A = newton_update_helper(dofs)
-        res_val = np.linalg.norm(res_vec)
-        rel_res_val = res_val / res_val_initial
-
-        logger.debug(f"l_2 res = {res_val}, relative l_2 res = {rel_res_val}")
-
-    assert np.all(np.isfinite(res_val)), f"res_val contains NaN, stop the program!"
-    assert np.all(np.isfinite(dofs)), f"dofs contains NaN, stop the program!"
-
-    if problem.prolongation_matrix is not None:
-        dofs = problem.prolongation_matrix @ dofs
-
-    if problem.macro_term is not None:
-        dofs = dofs + problem.macro_term
-
-    # If sol_list = [[[u1x, u1y],
-    #                 [u2x, u2y],
-    #                 [u3x, u3y],
-    #                 [u4x, u4y]],
-    #                [[p1],
-    #                 [p2]]],
-    # the flattend DOF vector will be [u1x, u1y, u2x, u2y, u3x, u3y, u4x, u4y, p1, p2]
-    sol_list = problem.unflatten_fn_sol_list(dofs)
-
-    end = time.time()
-    solve_time = end - start
-    logger.info(f"Solve took {solve_time} [s]")
-    logger.info(f"max of dofs = {np.max(dofs)}")
-    logger.info(f"min of dofs = {np.min(dofs)}")
-
-    return sol_list
+# Legacy _solver function removed - use newton_solve() instead
 
 
 # jit_newton_step_full is now imported from jit_solvers module
 
 
-def newton_solve_jit_core(problem: Any, dofs_init: np.ndarray, bc_indices: np.ndarray, 
-                         bc_values: np.ndarray, solver_options: Dict[str, Any]) -> np.ndarray:
-    """Core JIT-compatible Newton iteration using hybrid approach.
-    
-    This function separates the JIT-compilable parts from problem setup.
-    Uses JIT-compiled linear solves within a Python loop for the Newton iteration.
-    """
-    tol = solver_options.get('tol', 1e-6)
-    rel_tol = solver_options.get('rel_tol', 1e-8)
-    max_iter = solver_options.get('max_iter', 20)
-    use_precond = solver_options.get('precond', True)
-    linear_tol = solver_options.get('linear_tol', 1e-10)
-    linear_atol = solver_options.get('linear_atol', 1e-10) 
-    linear_maxiter = solver_options.get('linear_maxiter', 10000)
-    
-    def compute_residual_and_matrix(dofs):
-        """Non-JIT helper to compute residual and matrix - called outside JIT loop."""
-        # Handle prolongation matrix if present
-        dofs_full = dofs
-        if problem.prolongation_matrix is not None:
-            dofs_full = problem.prolongation_matrix @ dofs
-        
-        # Compute residual from weak form
-        sol_list = problem.unflatten_fn_sol_list(dofs_full)
-        res_list = problem.newton_update(sol_list)
-        res_vec = jax.flatten_util.ravel_pytree(res_list)[0]
-        
-        # Apply boundary conditions to residual
-        res_vec = jit_apply_bc_vec(res_vec, dofs_full, bc_indices, bc_values)
-        
-        # Handle prolongation matrix for residual
-        if problem.prolongation_matrix is not None:
-            res_vec = problem.prolongation_matrix.T @ res_vec
-        
-        # Compute system matrix
-        problem.compute_csr(CHUNK_SIZE)
-        A_result = get_A(problem)
-        if problem.prolongation_matrix is not None:
-            A, A_reduced = A_result
-        else:
-            A = A_result
-            A_reduced = A
-        
-        # Handle macro terms if present
-        if problem.macro_term is not None:
-            macro_term_jax = array_to_jax_vec(problem.macro_term, A.shape[0])
-            K_affine_vec = A @ macro_term_jax
-            del A
-            gc.collect()
-            affine_force = problem.prolongation_matrix.T @ K_affine_vec
-            res_vec += affine_force
-        
-        return res_vec, A_reduced
-    
-    # Initialize
-    dofs = dofs_init
-    
-    # Standard Python loop for residual/matrix computation (can't be JIT compiled)
-    for iteration in range(max_iter):
-        # Compute residual and matrix (non-JIT)
-        res_vec, A = compute_residual_and_matrix(dofs)
-        
-        # Check convergence
-        res_norm = float(jit_residual_norm(res_vec))
-        if iteration == 0:
-            res_norm_initial = res_norm
-            if res_norm < tol:
-                break
-        else:
-            rel_res_norm = res_norm / res_norm_initial if res_norm_initial > 0 else 0
-            if res_norm < tol or rel_res_norm < rel_tol:
-                break
-        
-        # Non-JIT Newton step for hybrid mode (avoids boolean tracing issues)
-        from .linear_solvers import jax_iterative_solve
-        neg_res = -res_vec
-        precond_type = 'jacobi' if use_precond else 'none'
-        delta_dofs = jax_iterative_solve(A, neg_res, 'bicgstab', precond_type)
-        dofs = dofs + delta_dofs
-    
-    return dofs
-
-
-def newton_solve_pure_jit(res_fn_jit: Callable, A_assembly_fn_jit: Callable, 
-                         dofs_init: np.ndarray, tol: float, rel_tol: float, 
-                         max_iter: int, use_precond: bool, linear_tol: float, 
-                         linear_atol: float, linear_maxiter: int) -> np.ndarray:
-    """Fully JIT-compiled Newton solver for pre-compiled residual and matrix functions.
-    
-    This is a pure JAX implementation that can be fully JIT-compiled when
-    the residual and matrix assembly functions are also JIT-compatible.
-    
-    Args:
-        res_fn_jit: JIT-compatible residual function
-        A_assembly_fn_jit: JIT-compatible matrix assembly function  
-        dofs_init: Initial DOF vector
-        tol: Absolute tolerance
-        rel_tol: Relative tolerance
-        max_iter: Maximum iterations
-        use_precond: Use preconditioning
-        linear_tol: Linear solver tolerance
-        linear_atol: Linear solver absolute tolerance
-        linear_maxiter: Linear solver max iterations
-        
-    Returns:
-        Converged DOF vector
-    """
-    def newton_cond(state):
-        iteration, dofs, res_norm, res_norm_initial, converged = state
-        # Continue if not converged and under max iterations
-        not_converged = ~converged
-        under_max_iter = iteration < max_iter
-        return not_converged & under_max_iter
-    
-    def newton_body(state):
-        iteration, dofs, res_norm_prev, res_norm_initial, converged = state
-        
-        # Compute residual and matrix
-        res_vec = res_fn_jit(dofs)
-        A = A_assembly_fn_jit(dofs)
-        
-        # Compute residual norm
-        res_norm = jit_residual_norm(res_vec)
-        
-        # Update initial residual norm on first iteration
-        res_norm_initial = np.where(iteration == 0, res_norm, res_norm_initial)
-        
-        # Check convergence
-        rel_res_norm = np.where(res_norm_initial > 0, res_norm / res_norm_initial, 0.0)
-        abs_converged = res_norm < tol
-        rel_converged = rel_res_norm < rel_tol
-        is_converged = abs_converged | rel_converged
-        
-        # Newton step (only if not converged)
-        dofs_new = np.where(
-            is_converged,
-            dofs,
-            jit_newton_step_full(dofs, A, res_vec, use_precond, linear_tol, linear_atol, linear_maxiter)
-        )
-        
-        return (iteration + 1, dofs_new, res_norm, res_norm_initial, is_converged)
-    
-    # Initial state: (iteration, dofs, res_norm, res_norm_initial, converged)
-    initial_state = (0, dofs_init, 0.0, 0.0, False)
-    
-    # Run Newton iteration using while_loop
-    final_state = jax.lax.while_loop(newton_cond, newton_body, initial_state)
-    
-    # Extract final DOFs
-    _, dofs_final, _, _, _ = final_state
-    return dofs_final
+# Legacy hybrid and pure JIT functions removed - use _jit_solver instead
 
 
 def newton_solve(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:
-    """Newton solver that is JIT-ready with multiple compilation strategies.
+    """JIT-compiled Newton solver for nonlinear finite element problems.
     
-    This solver provides three levels of JIT compilation:
-    1. Hybrid mode (default): JIT-compiled linear solves within Python Newton loop
-    2. Full JIT mode (use_jit=True): Uses existing jit_solver for maximum performance
-    3. Pure JIT mode: For fully JIT-compatible residual/matrix functions
+    This solver uses JIT compilation for optimal performance. All linear algebra
+    operations are JIT-compiled while assembly remains outside JIT boundary.
     
     Args:
         problem (Problem): Finite element problem instance.
@@ -741,123 +423,29 @@ def newton_solve(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.n
             - tol (float): Absolute convergence tolerance (default: 1e-6)
             - rel_tol (float): Relative convergence tolerance (default: 1e-8)
             - max_iter (int): Maximum Newton iterations (default: 20)
-            - use_jit (bool): Enable full JIT compilation via jit_solver (default: False)
             - method (str): Linear solver method (default: 'bicgstab')
             - precond (bool): Enable preconditioning (default: True)
             - linear_tol (float): Linear solver tolerance (default: 1e-10)
             - linear_atol (float): Linear solver absolute tolerance (default: 1e-10)
             - linear_maxiter (int): Linear solver max iterations (default: 10000)
-            - pure_jit_mode (bool): Use pure JIT mode with pre-compiled functions (default: False)
-            - res_fn_jit (Callable): JIT-compatible residual function (required for pure_jit_mode)
-            - A_fn_jit (Callable): JIT-compatible matrix assembly function (required for pure_jit_mode)
             
     Returns:
-        List[np.ndarray]: Solution list in the same format as original solver().
+        List[np.ndarray]: Solution list with converged degrees of freedom.
         
     Example:
-        Basic usage with hybrid JIT (recommended):
+        Basic usage:
         >>> solution = newton_solve(problem, {
         ...     'tol': 1e-6, 
         ...     'precond': True
         ... })
-        
-        Full JIT compilation using jit_solver:
-        >>> solution = newton_solve(problem, {
-        ...     'use_jit': True,
-        ...     'tol': 1e-8
-        ... })
-        
-        Pure JIT mode (for advanced users with JIT-compatible functions):
-        >>> solution = newton_solve(problem, {
-        ...     'pure_jit_mode': True,
-        ...     'res_fn_jit': my_jit_residual_fn,
-        ...     'A_fn_jit': my_jit_assembly_fn
-        ... })
     """
-    # Check compilation mode
-    use_jit = solver_options.get('use_jit', False)
-    pure_jit_mode = solver_options.get('pure_jit_mode', False)
-    
-    if use_jit:
-        logger.debug("Using fully JIT-compiled Newton solver via _jit_solver")
-        # Use the existing jit_solver for full JIT compilation
-        return _jit_solver(problem, solver_options)
-    
-    if pure_jit_mode:
-        logger.debug("Using pure JIT Newton solver with pre-compiled functions")
-        # Requires user to provide JIT-compatible functions
-        res_fn_jit = solver_options.get('res_fn_jit')
-        A_fn_jit = solver_options.get('A_fn_jit')
-        
-        if res_fn_jit is None or A_fn_jit is None:
-            raise ValueError("pure_jit_mode requires 'res_fn_jit' and 'A_fn_jit' in solver_options")
-        
-        # Extract parameters for pure JIT solver
-        if problem.prolongation_matrix is not None:
-            dofs_init = np.zeros(problem.prolongation_matrix.shape[1])
-        else:
-            dofs_init = np.zeros(problem.num_total_dofs_all_vars)
-        
-        tol = solver_options.get('tol', 1e-6)
-        rel_tol = solver_options.get('rel_tol', 1e-8)
-        max_iter = solver_options.get('max_iter', 20)
-        use_precond = solver_options.get('precond', True)
-        linear_tol = solver_options.get('linear_tol', 1e-10)
-        linear_atol = solver_options.get('linear_atol', 1e-10)
-        linear_maxiter = solver_options.get('linear_maxiter', 10000)
-        
-        dofs_final = newton_solve_pure_jit(
-            res_fn_jit, A_fn_jit, dofs_init, tol, rel_tol, max_iter,
-            use_precond, linear_tol, linear_atol, linear_maxiter
-        )
-        
-        # Finalize solution
-        if problem.prolongation_matrix is not None:
-            dofs_final = problem.prolongation_matrix @ dofs_final
-        
-        if problem.macro_term is not None:
-            dofs_final = dofs_final + problem.macro_term
-        
-        sol_list = problem.unflatten_fn_sol_list(dofs_final)
-        logger.debug("Pure JIT newton_solve completed successfully")
-        return sol_list
-    
-    # Default: Hybrid JIT mode
-    logger.debug("Using hybrid JIT Newton solver (JIT linear solves, Python Newton loop)")
-    
-    # Initialize DOFs exactly like the original solver
-    if problem.prolongation_matrix is not None:
-        dofs_init = np.zeros(problem.prolongation_matrix.shape[1])  # reduced dofs
-    else:
-        dofs_init = np.zeros(problem.num_total_dofs_all_vars)
-        # Apply boundary conditions to initial guess for better convergence
-        dofs_init = assign_bc(dofs_init, problem)
-    
-    # Pre-extract boundary condition data for JIT compatibility
-    bc_indices, bc_values = extract_solver_data(problem)
-    
-    # Use the JIT-ready core solver
-    dofs_final = newton_solve_jit_core(problem, dofs_init, bc_indices, bc_values, solver_options)
-    
-    # Finalize solution exactly like the original solver
-    if problem.prolongation_matrix is not None:
-        dofs_final = problem.prolongation_matrix @ dofs_final
-    
-    if problem.macro_term is not None:
-        dofs_final = dofs_final + problem.macro_term
-    
-    # Convert back to solution list format
-    sol_list = problem.unflatten_fn_sol_list(dofs_final)
-    
-    logger.debug("Hybrid JIT newton_solve completed successfully")
-    return sol_list
+    logger.debug("Using JIT-compiled Newton solver")
+    # Always use JIT solver for optimal performance
+    return _jit_solver(problem, solver_options)
 
 
-# Alias for backward compatibility
+# Aliases for backward compatibility
 jit_solver = _jit_solver
 
 
-# Apply JIT compilation with static arguments to functions defined in this module
-newton_solve_pure_jit = jax.jit(newton_solve_pure_jit, static_argnames=[
-    'max_iter', 'use_precond', 'linear_maxiter'
-])
+# Legacy pure JIT compilation removed

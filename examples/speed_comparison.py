@@ -76,7 +76,7 @@ def run_solver_comparison(mesh_sizes=[10, 30, 60]):
         'tol': 1e-5,
         'rel_tol': 1e-6,
         'max_iter': 15,
-        'use_jit': False  # Hybrid JIT mode
+        # JIT compilation is always enabled - this was hybrid mode
     }
     
     newton_solve_jit_options = {
@@ -84,7 +84,7 @@ def run_solver_comparison(mesh_sizes=[10, 30, 60]):
         'rel_tol': 1e-6, 
         'max_iter': 15,
         'method': "cg",
-        'use_jit': True   # Full JIT mode
+        # Full JIT mode is always enabled
     }
     
     conventional_options = {
@@ -235,8 +235,8 @@ def run_solver_comparison(mesh_sizes=[10, 30, 60]):
     # Recommendations
     print("\n🎯 RECOMMENDATIONS:")
     print("-" * 40)
-    print("• Use newton_solve(use_jit=True) for production/performance")
-    print("• Use newton_solve(use_jit=False) for development/debugging")
+    print("• JIT compilation is always enabled for optimal performance")
+    print("• Use pure_jit_mode=True for advanced optimization scenarios")
     print("• Conventional solver() is being superseded by new API")
     print("• All methods produce identical solutions (machine precision)")
     

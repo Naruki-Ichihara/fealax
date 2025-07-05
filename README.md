@@ -142,6 +142,69 @@ def optimize_material():
 optimized_params = optimize_material()
 ```
 
+#### Batch Parameter Solving
+
+```python
+# Efficient batch processing of multiple parameter sets
+from fealax.solver import BatchNewtonSolver, create_batch_solver
+
+# Create batch solver for efficient parameter processing
+batch_solver = create_batch_solver(problem, {
+    'tol': 1e-6,
+    'max_iter': 10,
+    'use_jit': True
+}, differentiable=True)
+
+# Parameter batch: different material properties
+param_batch = [
+    {'E': 200e9, 'nu': 0.3},   # Steel
+    {'E': 70e9,  'nu': 0.33},  # Aluminum
+    {'E': 210e9, 'nu': 0.28},  # Carbon steel
+    {'E': 110e9, 'nu': 0.35},  # Brass
+]
+
+# Solve all parameter sets efficiently
+solutions = batch_solver.solve_batch(param_batch, show_progress=True)
+
+# Process results
+for i, (params, solution) in enumerate(zip(param_batch, solutions)):
+    displacement = solution[0]
+    max_disp = jnp.max(jnp.abs(displacement))
+    print(f"Material {i+1}: E={params['E']/1e9:.0f} GPa → max_disp={max_disp:.4f} m")
+
+# Parameter sweep utility
+sweep_results = batch_solver.solve_parameter_sweep(
+    param_name='E',
+    param_values=jnp.linspace(100e9, 300e9, 10),
+    base_params={'nu': 0.3}
+)
+
+# Multi-parameter grid
+grid_results = batch_solver.solve_multi_parameter_grid(
+    param_grids={
+        'E': [150e9, 200e9, 250e9],
+        'nu': [0.25, 0.3, 0.35]
+    }
+)
+```
+
+#### Performance Benchmarking
+
+```python
+from fealax.solver import benchmark_batch_solving
+
+# Compare individual vs batch solving performance
+results = benchmark_batch_solving(
+    problem=problem,
+    params_batch=param_batch,
+    solver_options={'tol': 1e-6, 'use_jit': True}
+)
+
+print(f"Individual time: {results['individual_time']:.3f} s")
+print(f"Batch time: {results['batch_time']:.3f} s") 
+print(f"Performance ratio: {results['speedup_ratio']:.2f}x")
+```
+
 #### Advanced Configuration
 
 ```python
@@ -257,10 +320,20 @@ for E in E_range:
     results.append(post_process(solution))
 ```
 
+### Batch Parameter Studies
+```python
+# Efficient batch processing with optimized compilation
+batch_solver = create_batch_solver(problem, options)
+param_batch = [{'E': E, 'nu': 0.3} for E in E_range]
+solutions = batch_solver.solve_batch(param_batch)  # Optimized batch solving
+```
+
 ## Architecture
 
 **Solver Module** (`fealax.solver`):
 - `NewtonSolver` - Modern wrapper with clean API
+- `BatchNewtonSolver` - Efficient batch parameter processing
+- `SimpleVmapSolver` - Experimental vmap-based parallel solving
 - `newton_solve()` - Legacy Newton solver interface  
 - `ad_wrapper()` - Legacy automatic differentiation wrapper
 - `linear_solvers` - JAX-based linear solvers (BiCGSTAB, CG, sparse direct)
@@ -286,6 +359,12 @@ See the `examples/` directory for complete working examples:
   - Parameter-driven material properties
   - Automatic differentiation for sensitivity analysis
   - Performance optimization with JIT compilation
+
+- **`simple_vmap_example.py`** - Parallel parameter solving with vmap
+  - SimpleVmapSolver for batch processing
+  - Material property parameter sweeps
+  - Performance comparison: sequential vs parallel
+  - Automatic differentiation with parameter batches
 
 ### Migration Guide
 

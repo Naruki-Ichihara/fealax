@@ -145,7 +145,7 @@ class TestADWrapper:
         
         # Test wrapper creation without JIT
         solver_options = {'tol': 1e-6, 'max_iter': 5}
-        wrapper = ad_wrapper(problem, solver_options, use_jit=False)
+        wrapper = ad_wrapper(problem, solver_options)
         
         assert callable(wrapper), "AD wrapper should be callable"
 
@@ -158,7 +158,7 @@ class TestADWrapper:
         
         # Test wrapper creation with JIT
         solver_options = {'tol': 1e-6, 'max_iter': 5}
-        wrapper = ad_wrapper(problem, solver_options, use_jit=True)
+        wrapper = ad_wrapper(problem, solver_options)
         
         assert callable(wrapper), "JIT AD wrapper should be callable"
 
@@ -174,7 +174,7 @@ class TestADWrapper:
         try:
             # Create wrapper
             solver_options = {'tol': 1e-6, 'max_iter': 5}
-            wrapper = ad_wrapper(problem, solver_options, use_jit=False)
+            wrapper = ad_wrapper(problem, solver_options)
             
             # Test that it's callable
             assert callable(wrapper), "Wrapper should be callable"
@@ -228,7 +228,7 @@ class TestSolverOptions:
             'method': 'cg',
             'precond': True,
             'tol': 1e-8,
-            'use_jit': False
+            # JIT compilation is always enabled
         }
         
         try:

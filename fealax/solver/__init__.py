@@ -13,26 +13,21 @@ for convenience and backward compatibility.
 
 # Import all linear solver functions
 from .linear_solvers import (
-    jax_solve,
     jax_sparse_direct_solve,
     jax_iterative_solve,
-    linear_solver,
     solve,
-    solve_jit
+    solve_jit  # alias for solve
 )
 
 # Import all Newton solver functions
 from .newton_solvers import (
     newton_solve,
-    _solver,
     _jit_solver,
     linear_incremental_solver,
     line_search,
     get_A,
     jit_solver,  # alias for backward compatibility
-    extract_solver_data,
-    newton_solve_jit_core,
-    newton_solve_pure_jit
+    extract_solver_data
 )
 
 # Import boundary condition utilities
@@ -76,26 +71,23 @@ from .newton_wrapper import (
     create_newton_solver
 )
 
+# Vmap and batch solvers removed - use standard NewtonSolver for all cases
+
 # Export list for clarity
 __all__ = [
     # Linear solvers
-    'jax_solve',
     'jax_sparse_direct_solve', 
     'jax_iterative_solve',
-    'linear_solver',
     'solve',
     'solve_jit',
     
     # Newton solvers
     'newton_solve',
-    '_solver',
     '_jit_solver', 
     'linear_incremental_solver',
     'line_search',
     'get_A',
     'jit_solver',
-    'newton_solve_jit_core',
-    'newton_solve_pure_jit',
     
     # JIT solvers
     'jit_newton_step_bicgstab_precond',
@@ -129,5 +121,6 @@ __all__ = [
     
     # Newton solver wrapper
     'NewtonSolver',
-    'create_newton_solver'
+    'create_newton_solver',
+    
 ]

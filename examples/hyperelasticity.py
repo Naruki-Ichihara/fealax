@@ -170,7 +170,7 @@ def solve_hyperelastic_problem():
         'tol': 1e-5,
         'rel_tol': 1e-6,
         'max_iter': 15,
-        'use_jit': True,  # Use JIT compilation for performance
+        # JIT compilation is always enabled for optimal performance
         'linear_solver': 'bicgstab',
         'precond': True,
         'line_search': True  # Enable line search for robustness

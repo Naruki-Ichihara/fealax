@@ -50,7 +50,7 @@ from typing import Dict, List, Optional, Callable, Union, Tuple, Any
 import gc
 
 from fealax import logger
-from .linear_solvers import linear_solver
+# linear_solver import removed - using solve_jit instead
 from .boundary_conditions import get_flatten_fn, apply_bc
 # Imports are done inside functions to avoid circular imports
 
@@ -68,6 +68,8 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
     with respect to problem parameters. This is essential for optimization,
     parameter identification, and sensitivity analysis.
     
+    Uses JIT-compiled linear solver for optimal performance in the adjoint solve.
+    
     Args:
         problem (Problem): Finite element problem instance.
         sol_list (List[np.ndarray]): Solution state at which to evaluate gradients.
@@ -82,9 +84,10 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
         The method solves the adjoint system A^T λ = v where A is the Jacobian
         at the solution state, then computes the parameter sensitivities using
         the chain rule: dF/dp = -λ^T (∂c/∂p) where c is the constraint (residual).
+        The adjoint solve uses JIT-compiled linear algebra for performance.
         
     Example:
-        >>> adjoint_options = {'jax_solver': {'precond': True}}
+        >>> adjoint_options = {'method': 'bicgstab', 'precond': True}
         >>> gradients = implicit_vjp(problem, solution, params, v_list, adjoint_options)
     """
 
@@ -139,9 +142,10 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
 
     # Create transpose matrix for adjoint solve
     A_reduced_T = BCOO((A_reduced.data, A_reduced.indices[:, np.array([1, 0])]), shape=(A_reduced.shape[1], A_reduced.shape[0]))
-    adjoint_vec = linear_solver(
-        A_reduced_T, v_vec, None, adjoint_solver_options
-    )
+    
+    # Use JIT-compiled linear solver for better performance
+    from .linear_solvers import solve
+    adjoint_vec = solve(A_reduced_T, v_vec, adjoint_solver_options)
 
     if problem.prolongation_matrix is not None:
         adjoint_vec = problem.prolongation_matrix @ adjoint_vec
@@ -157,17 +161,18 @@ def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: 
     return vjp_result
 
 
-def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}, use_jit: bool = False) -> Callable[[Any], List[np.ndarray]]:
+def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
     """Internal automatic differentiation wrapper for the solver.
     
     This is the internal implementation used by the NewtonSolver wrapper class.
     Direct use of this function is discouraged - use the NewtonSolver class instead.
     
+    The wrapper always uses JIT compilation for optimal performance.
+    
     Args:
         problem (Problem): Finite element problem template.
         solver_options (dict, optional): Options for forward solver. Defaults to {}.
         adjoint_solver_options (dict, optional): Options for adjoint solver. Defaults to {}.
-        use_jit (bool, optional): Whether to JIT-compile the wrapper. Defaults to False.
         
     Returns:
         Callable: JAX-differentiable function that takes parameters and returns solution.
@@ -176,24 +181,18 @@ def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solve
         This is an internal function. Use NewtonSolver wrapper class for public API:
         
         >>> from fealax.solver import NewtonSolver
-        >>> solver = NewtonSolver(problem, solver_options, differentiable=True)
+        >>> solver = NewtonSolver(problem, solver_options)
         >>> solution = solver.solve(params)
     """
     @jax.custom_vjp
     def fwd_pred(params):
         # Import locally to avoid circular imports
-        from .newton_solvers import newton_solve, _solver
+        from .newton_solvers import _jit_solver
         
         problem.set_params(params)
-        # Choose solver based on JIT option
-        if 'use_jit' in solver_options or use_jit:
-            # Use JIT-compatible solver
-            jit_options = solver_options.copy()
-            jit_options['use_jit'] = True
-            sol_list = newton_solve(problem, jit_options)
-        else:
-            # Use regular solver
-            sol_list = _solver(problem, solver_options)
+        # Use JIT solver directly - JIT only applies to the solver, not assembly
+        jit_options = solver_options.copy()
+        sol_list = _jit_solver(problem, jit_options)
         return sol_list
 
     def f_fwd(params):
@@ -208,26 +207,24 @@ def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solve
 
     fwd_pred.defvjp(f_fwd, f_bwd)
     
-    # Optionally JIT-compile the entire wrapper
-    if use_jit:
-        logger.debug("JIT-compiling AD wrapper")
-        return jax.jit(fwd_pred)
-    else:
-        return fwd_pred
+    # Return the AD wrapper - JIT compilation is applied at the solver level
+    logger.debug("AD wrapper created with JIT solver")
+    return fwd_pred
 
 
-def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}, use_jit: bool = False) -> Callable[[Any], List[np.ndarray]]:
+def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
     """Create automatic differentiation wrapper for the solver.
     
     This function provides backward compatibility with the original ad_wrapper API.
     For new code, consider using the NewtonSolver wrapper class which provides
     a cleaner, more object-oriented interface.
     
+    The wrapper always uses JIT compilation for optimal performance.
+    
     Args:
         problem (Problem): Finite element problem template.
         solver_options (dict, optional): Options for forward solver. Defaults to {}.
         adjoint_solver_options (dict, optional): Options for adjoint solver. Defaults to {}.
-        use_jit (bool, optional): Whether to JIT-compile the wrapper. Defaults to False.
         
     Returns:
         Callable: JAX-differentiable function that takes parameters and returns solution.
@@ -241,11 +238,11 @@ def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver
         Recommended usage with NewtonSolver:
         
         >>> from fealax.solver import NewtonSolver
-        >>> solver = NewtonSolver(problem, solver_options, differentiable=True)
+        >>> solver = NewtonSolver(problem, solver_options)
         >>> solution = solver.solve(params)
         
     Note:
         This function is provided for backward compatibility. The NewtonSolver
         wrapper class offers a more intuitive API for new projects.
     """
-    return _ad_wrapper(problem, solver_options, adjoint_solver_options, use_jit)
+    return _ad_wrapper(problem, solver_options, adjoint_solver_options)
