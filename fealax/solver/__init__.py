@@ -60,9 +60,8 @@ from .jit_solvers import (
 
 # Import solver utilities
 from .solver_utils import (
-    implicit_vjp,
     ad_wrapper,
-    _ad_wrapper
+    _differentiable_solver
 )
 
 # Import Newton solver wrapper

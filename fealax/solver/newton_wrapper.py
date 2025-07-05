@@ -17,7 +17,7 @@ import jax
 import jax.numpy as np
 from typing import Dict, List, Any
 from fealax import logger
-from .solver_utils import _ad_wrapper
+from .solver_utils import _differentiable_solver
 
 
 class NewtonSolver:
@@ -25,13 +25,12 @@ class NewtonSolver:
     
     This class provides a wrapper around the Newton solver that is always
     differentiable through JAX transformations. The solver automatically
-    supports gradient computation without any special configuration and
-    uses JIT compilation for optimal performance.
+    supports gradient computation through direct JAX automatic differentiation
+    and uses JIT compilation for optimal performance.
     
     Args:
         problem: Finite element problem instance
         solver_options: Configuration options for the Newton solver
-        adjoint_solver_options: Configuration for adjoint solver (defaults to solver_options)
         
     Example:
         Basic solver usage:
@@ -46,21 +45,14 @@ class NewtonSolver:
     def __init__(
         self,
         problem: Any,
-        solver_options: Dict[str, Any] = {},
-        adjoint_solver_options: Dict[str, Any] = None
+        solver_options: Dict[str, Any] = {}
     ):
         self.problem = problem
         self.solver_options = solver_options.copy()
-        # If no adjoint options provided, use the same as forward solver
-        self.adjoint_solver_options = adjoint_solver_options if adjoint_solver_options is not None else solver_options.copy()
         
-        # Create the differentiable solver function with JIT always enabled
+        # Create the differentiable solver function
         logger.debug("Creating differentiable Newton solver with JIT compilation")
-        self._solve_fn = _ad_wrapper(
-            problem, 
-            solver_options, 
-            self.adjoint_solver_options
-        )
+        self._solve_fn = _differentiable_solver(problem, solver_options)
         
         # Initialize parameter names and vmap solver as None (created on first solve)
         self._param_names = None
@@ -220,26 +212,7 @@ class NewtonSolver:
         self.solver_options.update(new_options)
         
         # Recreate solver function with new options
-        self._solve_fn = _ad_wrapper(
-            self.problem, 
-            self.solver_options, 
-            self.adjoint_solver_options
-        )
-    
-    def update_adjoint_options(self, new_options: Dict[str, Any]):
-        """Update adjoint solver options.
-        
-        Args:
-            new_options: New adjoint solver configuration options
-        """
-        self.adjoint_solver_options.update(new_options)
-        
-        # Recreate solver function with new adjoint options
-        self._solve_fn = _ad_wrapper(
-            self.problem, 
-            self.solver_options, 
-            self.adjoint_solver_options
-        )
+        self._solve_fn = _differentiable_solver(self.problem, self.solver_options)
     
     @property
     def is_jit_compiled(self) -> bool:
@@ -315,7 +288,6 @@ class NewtonSolver:
 def create_newton_solver(
     problem: Any,
     solver_options: Dict[str, Any] = {},
-    adjoint_solver_options: Dict[str, Any] = None,
     differentiable: bool = None  # Deprecated parameter for backward compatibility
 ) -> NewtonSolver:
     """Create a Newton solver instance with specified configuration.
@@ -327,7 +299,6 @@ def create_newton_solver(
     Args:
         problem: Finite element problem instance
         solver_options: Configuration options for the Newton solver
-        adjoint_solver_options: Configuration for adjoint solver (defaults to solver_options)
         differentiable: Deprecated - kept for backward compatibility
         
     Returns:
@@ -341,8 +312,4 @@ def create_newton_solver(
     if differentiable is not None:
         logger.warning("The 'differentiable' parameter is deprecated. NewtonSolver is always differentiable.")
     
-    return NewtonSolver(
-        problem=problem,
-        solver_options=solver_options,
-        adjoint_solver_options=adjoint_solver_options
-    )
+    return NewtonSolver(problem=problem, solver_options=solver_options)

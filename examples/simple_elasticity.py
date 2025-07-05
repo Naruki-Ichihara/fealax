@@ -262,3 +262,4 @@ def demonstrate_optimization():
 if __name__ == "__main__":
     # Run main elasticity example
     solver, material_params, solution = main()
+    demonstrate_optimization()

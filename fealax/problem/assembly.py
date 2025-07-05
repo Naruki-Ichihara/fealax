@@ -153,13 +153,9 @@ class AssemblyManager:
                 val, jac = vmap_fn(*input_col)
                 values.append(val)
                 jacs.append(jac)
-            # Handle traced arrays during vmap/autodiff by using JAX operations
-            if values and hasattr(values[0], '_trace'):
-                values = np.vstack(values)
-                jacs = np.vstack(jacs) if jacs else jacs
-            else:
-                values = np_version.vstack(values)
-                jacs = np_version.vstack(jacs)
+            # Always use JAX operations for vstack to avoid tracer leaks
+            values = np.vstack(values)
+            jacs = np.vstack(jacs) if jacs else jacs
 
             return values, jacs
         else:
@@ -177,11 +173,8 @@ class AssemblyManager:
 
                 val = vmap_fn(*input_col)
                 values.append(val)
-            # Handle traced arrays during vmap/autodiff by using JAX operations
-            if values and hasattr(values[0], '_trace'):
-                values = np.vstack(values)
-            else:
-                values = np_version.vstack(values)
+            # Always use JAX operations for vstack to avoid tracer leaks
+            values = np.vstack(values)
             return values
 
     @staticmethod

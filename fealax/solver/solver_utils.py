@@ -1,23 +1,16 @@
-"""Solver utility functions for automatic differentiation and parameter sensitivity.
+"""Solver utility functions for automatic differentiation.
 
-This module provides utility functions for advanced solver capabilities including
-automatic differentiation, parameter sensitivity analysis, and optimization support.
-It implements the adjoint method for efficient gradient computation through
-nonlinear finite element solutions.
-
-The module includes:
-    - Adjoint method implementation for parameter sensitivity
-    - Automatic differentiation wrappers for solver functions
-    - VJP (vector-Jacobian product) computations
-    - Integration with JAX's automatic differentiation system
+This module provides utility functions for creating JAX-differentiable solver
+functions. The implementation uses direct JAX automatic differentiation for
+robust and accurate gradient computation through nonlinear finite element
+solutions.
 
 Key Functions:
-    implicit_vjp: Compute gradients using the adjoint method
-    ad_wrapper: Create differentiable solver functions
-    extract_solver_data: Extract JIT-compatible boundary condition data
+    _differentiable_solver: Create JAX-differentiable solver function (internal)
+    ad_wrapper: Create differentiable solver (backward compatibility)
 
 Example:
-    Creating a differentiable solver for optimization:
+    Creating a differentiable solver:
     
     >>> from fealax.solver.solver_utils import ad_wrapper
     >>> from fealax.problem import Problem
@@ -36,143 +29,45 @@ Example:
     >>> grad_fn = jax.grad(objective)
     >>> gradients = grad_fn(initial_params)
 
+Recommended Usage:
+    Use the NewtonSolver wrapper class for new code:
+    
+    >>> from fealax.solver import NewtonSolver
+    >>> solver = NewtonSolver(problem, solver_options)
+    >>> solution = solver.solve(params)
+
 Note:
-    This module requires JAX for automatic differentiation and should be used
-    in conjunction with the main solver functions for parameter optimization
-    and sensitivity analysis.
+    This module uses direct JAX automatic differentiation, which is more
+    robust and accurate than complex custom VJP implementations.
 """
 
 import jax
 import jax.numpy as np
-import jax.flatten_util
-from jax.experimental.sparse import BCOO
-from typing import Dict, List, Optional, Callable, Union, Tuple, Any
-import gc
+from typing import Dict, List, Callable, Any
 
 from fealax import logger
-# linear_solver import removed - using solve_jit instead
-from .boundary_conditions import get_flatten_fn, apply_bc
 # Imports are done inside functions to avoid circular imports
 
 from jax import config
 config.update("jax_enable_x64", True)
 
 
-# extract_solver_data has been moved to newton_solvers.py to avoid circular imports
+# Core solver utilities for automatic differentiation
 
 
-def implicit_vjp(problem: Any, sol_list: List[np.ndarray], params: Any, v_list: List[np.ndarray], adjoint_solver_options: Dict[str, Any]) -> Any:
-    """Compute vector-Jacobian product using the adjoint method.
+# implicit_vjp function removed - direct JAX AD is more accurate and simpler
+
+
+def _differentiable_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
+    """Create a differentiable solver function using direct JAX automatic differentiation.
     
-    Implements the adjoint method to efficiently compute gradients of functionals
-    with respect to problem parameters. This is essential for optimization,
-    parameter identification, and sensitivity analysis.
-    
-    Uses JIT-compiled linear solver for optimal performance in the adjoint solve.
-    
-    Args:
-        problem (Problem): Finite element problem instance.
-        sol_list (List[np.ndarray]): Solution state at which to evaluate gradients.
-        params: Problem parameters with respect to which gradients are computed.
-        v_list (List[np.ndarray]): Vector for the vector-Jacobian product.
-        adjoint_solver_options (dict): Linear solver options for adjoint system.
-        
-    Returns:
-        Gradients with respect to problem parameters.
-        
-    Note:
-        The method solves the adjoint system A^T λ = v where A is the Jacobian
-        at the solution state, then computes the parameter sensitivities using
-        the chain rule: dF/dp = -λ^T (∂c/∂p) where c is the constraint (residual).
-        The adjoint solve uses JIT-compiled linear algebra for performance.
-        
-    Example:
-        >>> adjoint_options = {'method': 'bicgstab', 'precond': True}
-        >>> gradients = implicit_vjp(problem, solution, params, v_list, adjoint_options)
-    """
-
-    def constraint_fn(dofs, params):
-        """c(u, p)"""
-        problem.set_params(params)
-        res_fn = problem.compute_residual
-        res_fn = get_flatten_fn(res_fn, problem)
-        res_fn = apply_bc(res_fn, problem)
-        return res_fn(dofs)
-
-    def constraint_fn_sol_to_sol(sol_list, params):
-        dofs = jax.flatten_util.ravel_pytree(sol_list)[0]
-        con_vec = constraint_fn(dofs, params)
-        return problem.unflatten_fn_sol_list(con_vec)
-
-    def get_partial_params_c_fn(sol_list):
-        """c(u=u, p)"""
-
-        def partial_params_c_fn(params):
-            return constraint_fn_sol_to_sol(sol_list, params)
-
-        return partial_params_c_fn
-
-    def get_vjp_contraint_fn_params(params, sol_list):
-        """v*(partial dc/dp)"""
-        partial_c_fn = get_partial_params_c_fn(sol_list)
-
-        def vjp_linear_fn(v_list):
-            _, f_vjp = jax.vjp(partial_c_fn, params)
-            (val,) = f_vjp(v_list)
-            return val
-
-        return vjp_linear_fn
-
-    # Import locally to avoid circular imports
-    from .newton_solvers import get_A
-    
-    problem.set_params(params)
-    problem.newton_update(sol_list)
-
-    A_result = get_A(problem)
-    if problem.prolongation_matrix is not None:
-        A, A_reduced = A_result
-    else:
-        A = A_result
-        A_reduced = A
-    v_vec = jax.flatten_util.ravel_pytree(v_list)[0]
-
-    if problem.prolongation_matrix is not None:
-        v_vec = problem.prolongation_matrix.T @ v_vec
-
-    # Create transpose matrix for adjoint solve
-    A_reduced_T = BCOO((A_reduced.data, A_reduced.indices[:, np.array([1, 0])]), shape=(A_reduced.shape[1], A_reduced.shape[0]))
-    
-    # Use JIT-compiled linear solver for better performance
-    from .linear_solvers import solve
-    adjoint_vec = solve(A_reduced_T, v_vec, adjoint_solver_options)
-
-    if problem.prolongation_matrix is not None:
-        adjoint_vec = problem.prolongation_matrix @ adjoint_vec
-
-    vjp_linear_fn = get_vjp_contraint_fn_params(params, sol_list)
-    vjp_result = vjp_linear_fn(problem.unflatten_fn_sol_list(adjoint_vec))
-    vjp_result = jax.tree_map(lambda x: -x, vjp_result)
-    
-    # JAX matrices are automatically garbage collected
-    del A, A_reduced
-    gc.collect()
-
-    return vjp_result
-
-
-def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
-    """Internal automatic differentiation wrapper for the solver.
-    
-    This is the internal implementation used by the NewtonSolver wrapper class.
-    Direct use of this function is discouraged - use the NewtonSolver class instead.
-    
-    The wrapper always uses JIT compilation for optimal performance.
+    This function creates a JAX-differentiable solver that uses direct automatic
+    differentiation through the Newton-Raphson solver. This approach is simpler
+    and more accurate than complex custom VJP implementations.
     
     Args:
         problem (Problem): Finite element problem template.
-        solver_options (dict, optional): Options for forward solver. Defaults to {}.
-        adjoint_solver_options (dict, optional): Options for adjoint solver. Defaults to {}.
+        solver_options (dict, optional): Options for Newton solver. Defaults to {}.
         
     Returns:
         Callable: JAX-differentiable function that takes parameters and returns solution.
@@ -184,48 +79,30 @@ def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solve
         >>> solver = NewtonSolver(problem, solver_options)
         >>> solution = solver.solve(params)
     """
-    @jax.custom_vjp
-    def fwd_pred(params):
+    
+    def solver_fn(params):
         # Import locally to avoid circular imports
         from .newton_solvers import _jit_solver
         
         # Set parameters and solve
         problem.set_params(params)
-        # Use JIT solver directly - JIT only applies to the solver, not assembly
-        jit_options = solver_options.copy()
-        sol_list = _jit_solver(problem, jit_options)
+        sol_list = _jit_solver(problem, solver_options)
         return sol_list
-
-    def f_fwd(params):
-        sol_list = fwd_pred(params)
-        return sol_list, (params, sol_list)
-
-    def f_bwd(res, v):
-        logger.info("Running backward and solving the adjoint problem...")
-        params, sol_list = res
-        vjp_result = implicit_vjp(problem, sol_list, params, v, adjoint_solver_options)
-        return (vjp_result,)
-
-    fwd_pred.defvjp(f_fwd, f_bwd)
     
-    # Return the AD wrapper - JIT compilation is applied at the solver level
-    logger.debug("AD wrapper created with JIT solver")
-    return fwd_pred
+    logger.debug("Differentiable solver created - JAX handles AD automatically")
+    return solver_fn
 
 
-def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
+def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}) -> Callable[[Any], List[np.ndarray]]:
     """Create automatic differentiation wrapper for the solver.
     
     This function provides backward compatibility with the original ad_wrapper API.
     For new code, consider using the NewtonSolver wrapper class which provides
     a cleaner, more object-oriented interface.
     
-    The wrapper always uses JIT compilation for optimal performance.
-    
     Args:
         problem (Problem): Finite element problem template.
-        solver_options (dict, optional): Options for forward solver. Defaults to {}.
-        adjoint_solver_options (dict, optional): Options for adjoint solver. Defaults to {}.
+        solver_options (dict, optional): Options for Newton solver. Defaults to {}.
         
     Returns:
         Callable: JAX-differentiable function that takes parameters and returns solution.
@@ -246,4 +123,4 @@ def ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solver
         This function is provided for backward compatibility. The NewtonSolver
         wrapper class offers a more intuitive API for new projects.
     """
-    return _ad_wrapper(problem, solver_options, adjoint_solver_options)
+    return _differentiable_solver(problem, solver_options)
