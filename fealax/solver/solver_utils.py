@@ -189,6 +189,7 @@ def _ad_wrapper(problem: Any, solver_options: Dict[str, Any] = {}, adjoint_solve
         # Import locally to avoid circular imports
         from .newton_solvers import _jit_solver
         
+        # Set parameters and solve
         problem.set_params(params)
         # Use JIT solver directly - JIT only applies to the solver, not assembly
         jit_options = solver_options.copy()

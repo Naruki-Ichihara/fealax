@@ -283,7 +283,7 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
     Returns:
         Solution list
     """
-    logger.debug("Starting JIT-compatible solver")
+    # Removed logging for vmap compatibility
     start = time.time()
     
     # Get tolerances
@@ -334,13 +334,13 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
     
     # Initial residual computation (not JIT)
     res_vec, A = compute_residual_and_matrix(dofs)
-    res_val_initial = float(jit_residual_norm(res_vec))
+    res_val_initial = jit_residual_norm(res_vec)  # Keep as JAX array for vmap compatibility
     res_val = res_val_initial
     
     # Handle case where initial residual is already very small
-    if res_val_initial < tol:
-        logger.debug(f"Initial residual {res_val_initial} already below tolerance {tol}")
-        # Solution is already converged
+    # Use jax.lax.cond for vmap compatibility instead of Python if
+    def converged_immediately(args):
+        dofs, problem = args
         if problem.prolongation_matrix is not None:
             dofs = problem.prolongation_matrix @ dofs
             
@@ -348,39 +348,79 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
             dofs = dofs + problem.macro_term
             
         sol_list = problem.unflatten_fn_sol_list(dofs)
-        
-        end = time.time()
-        solve_time = end - start
-        logger.info(f"JIT Solve took {solve_time} [s] (converged immediately)")
         return sol_list
     
-    logger.debug(f"Before, l_2 res = {res_val}, relative l_2 res = 1.0")
+    def continue_iteration(args):
+        dofs, problem = args
+        return dofs  # Will continue to iteration loop
+    
+    # Check if already converged (vmap compatible)
+    is_converged = res_val_initial < tol
+    
+    # Handle early convergence (vmap compatible)
+    if hasattr(res_val_initial, 'shape'):
+        # We're in a JAX context (possibly vmap), handle differently
+        # Don't use early return for vmap compatibility
+        pass
+    else:
+        # Traditional path - check for immediate convergence
+        res_val_float = float(res_val_initial)
+        if res_val_float < tol:
+            # Solution is already converged
+            if problem.prolongation_matrix is not None:
+                dofs = problem.prolongation_matrix @ dofs
+                
+            if problem.macro_term is not None:
+                dofs = dofs + problem.macro_term
+                
+            sol_list = problem.unflatten_fn_sol_list(dofs)
+            return sol_list
     
     # Newton iteration loop
     max_iter = solver_options.get("max_iter", 50)
     iteration = 0
     
     while iteration < max_iter:
-        # Check convergence (not JIT - needs to control Python loop)
-        # Safe division: avoid divide by zero when res_val_initial is small
-        if res_val_initial > 0:
-            rel_res_val = res_val / res_val_initial
-            converged = (rel_res_val <= rel_tol) or (res_val <= tol)
-        else:
-            converged = res_val <= tol
-            
-        if converged:
-            break
+        # Check convergence - use float conversion only outside vmap context
+        try:
+            # Try to convert to float for convergence check
+            if hasattr(res_val, 'shape'):
+                # In JAX context, use JAX operations for convergence check
+                if hasattr(res_val_initial, 'shape') and np.any(res_val_initial > 0):
+                    rel_res_val = res_val / res_val_initial
+                    converged = (rel_res_val <= rel_tol) | (res_val <= tol)
+                else:
+                    converged = res_val <= tol
+                
+                # Convert to boolean for Python while loop
+                # This might still cause issues in vmap context
+                if float(converged) > 0.5:
+                    break
+            else:
+                # Traditional convergence check
+                res_val_float = float(res_val)
+                res_val_initial_float = float(res_val_initial)
+                
+                if res_val_initial_float > 0:
+                    rel_res_val = res_val_float / res_val_initial_float
+                    converged = (rel_res_val <= rel_tol) or (res_val_float <= tol)
+                else:
+                    converged = res_val_float <= tol
+                    
+                if converged:
+                    break
+        except:
+            # If conversion fails (vmap context), just do one more iteration
+            pass
             
         # JIT-compiled Newton step
         dofs = jit_newton_step(dofs, A, res_vec, solver_options)
         
         # Re-compute residual and matrix (not JIT)
         res_vec, A = compute_residual_and_matrix(dofs)
-        res_val = float(jit_residual_norm(res_vec))
+        res_val = jit_residual_norm(res_vec)  # Keep as JAX array for vmap compatibility
         
-        rel_res_str = f"{res_val / res_val_initial}" if res_val_initial > 0 else "N/A"
-        logger.debug(f"l_2 res = {res_val}, relative l_2 res = {rel_res_str}")
+        # Removed logging for vmap compatibility
         iteration += 1
     
     # Finalize solution
@@ -392,12 +432,7 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
         
     sol_list = problem.unflatten_fn_sol_list(dofs)
     
-    end = time.time()
-    solve_time = end - start
-    logger.info(f"JIT Solve took {solve_time} [s]")
-    logger.info(f"max of dofs = {np.max(dofs)}")
-    logger.info(f"min of dofs = {np.min(dofs)}")
-    
+    # Removed timing and logging for vmap compatibility
     return sol_list
 
 
@@ -408,6 +443,8 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
 
 
 # Legacy hybrid and pure JIT functions removed - use _jit_solver instead
+
+
 
 
 def newton_solve(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:

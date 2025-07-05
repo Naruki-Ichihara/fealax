@@ -61,26 +61,152 @@ class NewtonSolver:
             solver_options, 
             self.adjoint_solver_options
         )
+        
+        # Initialize parameter names and vmap solver as None (created on first solve)
+        self._param_names = None
+        self._vmap_solve_fn = None
     
+    def _extract_param_names(self, params: Any) -> List[str]:
+        """Extract parameter names from a parameter dictionary or list."""
+        if isinstance(params, dict):
+            return list(params.keys())
+        elif isinstance(params, list) and len(params) > 0 and isinstance(params[0], dict):
+            return list(params[0].keys())
+        else:
+            raise ValueError("Cannot extract parameter names from parameters. Expected dict or list of dicts.")
+    
+    def _create_vmap_solver(self, param_names: List[str]):
+        """Create vmap-compatible solver functions for any parameter set."""
+        
+        def solve_with_dynamic_params(*param_values):
+            """Solver that takes individual parameters dynamically (works with vmap)."""
+            params = dict(zip(param_names, param_values))
+            # Use the regular solver path - it should now be vmap-compatible
+            return self._solve_fn(params)
+        
+        # Create vmapped version with appropriate in_axes (all parameters are batched)
+        in_axes = tuple(0 for _ in param_names)
+        self._vmap_solve_fn = jax.vmap(solve_with_dynamic_params, in_axes=in_axes)
+        self._param_names = param_names
+        
+        logger.debug(f"Created vmap solver for parameters: {param_names}")
     
     def solve(self, params: Any) -> List[np.ndarray]:
         """Solve the finite element problem with given parameters.
         
+        Automatically applies vmap for multiple parameter sets, excluding assembly.
+        
         Args:
-            params: Problem parameters (material properties, boundary conditions, etc.)
+            params: Problem parameters. Can be:
+                - Single parameter dict: {'param1': value1, 'param2': value2}
+                - List of parameter dicts: [{'param1': val1, 'param2': val2}, ...]
+                - Dict with batched arrays: {'param1': [val1, val2], 'param2': [val3, val4]}
             
         Returns:
             Solution list where each array corresponds to a variable.
+            For batched inputs, returns batched solutions with leading batch dimension.
             
         Example:
-            >>> solution = solver.solve(material_params)
-            >>> displacement = solution[0]  # First variable (e.g., displacement)
+            Single solve:
+            >>> solution = solver.solve({'E': 200e9, 'nu': 0.3})
+            >>> displacement = solution[0]  # Shape: (n_dofs,)
             
-            With gradients:
-            >>> grad_fn = jax.grad(lambda p: jnp.sum(solver.solve(p)[0]))
-            >>> gradients = grad_fn(material_params)
+            Batch solve (automatic vmap):
+            >>> batch_params = [{'E': 200e9, 'nu': 0.3}, {'E': 300e9, 'nu': 0.25}]
+            >>> solutions = solver.solve(batch_params)
+            >>> displacements = solutions[0]  # Shape: (batch_size, n_dofs)
         """
-        return self._solve_fn(params)
+        # Initialize vmap solver on first call
+        if self._param_names is None:
+            self._param_names = self._extract_param_names(params)
+            self._create_vmap_solver(self._param_names)
+            logger.debug(f"Initialized Newton solver for parameters: {self._param_names}")
+        
+        # Detect if we have multiple parameter sets
+        is_batch = self._is_batch_params(params)
+        
+        if is_batch:
+            logger.info(f"Detected batch parameters, applying batch solving")
+            return self._solve_batch_vmap(params)
+        else:
+            return self._solve_fn(params)
+    
+    def _is_batch_params(self, params: Any) -> bool:
+        """Detect if parameters represent multiple parameter sets."""
+        # Case 1: List of parameter dictionaries
+        if isinstance(params, list) and len(params) > 0:
+            if isinstance(params[0], dict):
+                return True
+        
+        # Case 2: Dictionary with batched arrays (all values are arrays with same leading dimension > 1)
+        if isinstance(params, dict):
+            array_lengths = []
+            for value in params.values():
+                if hasattr(value, '__len__') and not isinstance(value, str):
+                    try:
+                        value_array = np.asarray(value)
+                        if value_array.ndim >= 1 and value_array.shape[0] > 1:
+                            array_lengths.append(value_array.shape[0])
+                    except:
+                        pass
+            
+            # If all arrays have same length > 1, it's a batch
+            if array_lengths and len(set(array_lengths)) == 1 and array_lengths[0] > 1:
+                return True
+        
+        return False
+    
+    def _solve_batch_vmap(self, params: Any) -> List[np.ndarray]:
+        """Solve batch of parameters using vmap for parallel execution."""
+        # Convert to standardized format: dict with batched arrays
+        if isinstance(params, list):
+            # Convert list of dicts to arrays
+            batch_size = len(params)
+            param_arrays = {}
+            for param_name in self._param_names:
+                param_arrays[param_name] = np.array([p[param_name] for p in params])
+        else:
+            # Already in dict format with arrays
+            param_arrays = {}
+            for param_name in self._param_names:
+                param_arrays[param_name] = np.array(params[param_name])
+            batch_size = len(param_arrays[self._param_names[0]])
+        
+        logger.debug(f"Running vmap solver for batch size: {batch_size}")
+        
+        # Try vmap first with the new vmap-compatible solver
+        try:
+            logger.info("Attempting vmap solving for batch parameters")
+            # Pass parameters in the order expected by vmap function
+            param_values = [param_arrays[name] for name in self._param_names]
+            solutions = self._vmap_solve_fn(*param_values)
+            logger.info("✓ Vmap solving successful!")
+            return solutions
+        except Exception as e:
+            logger.warning(f"Vmap failed: {e}, falling back to sequential solving")
+            # Fall back to sequential solving
+            param_dicts = []
+            for i in range(batch_size):
+                param_dict = {name: param_arrays[name][i] for name in self._param_names}
+                param_dicts.append(param_dict)
+            return self._solve_batch_sequential(param_dicts)
+    
+    def _solve_batch_sequential(self, param_list: List[Dict[str, Any]]) -> List[List[np.ndarray]]:
+        """Fallback sequential solving for batch parameters."""
+        solutions = []
+        for params in param_list:
+            solution = self._solve_fn(params)
+            solutions.append(solution)
+        
+        # Stack solutions to match vmap output format
+        if solutions:
+            stacked_solutions = []
+            for var_idx in range(len(solutions[0])):
+                var_solutions = [sol[var_idx] for sol in solutions]
+                stacked_solutions.append(np.stack(var_solutions, axis=0))
+            return stacked_solutions
+        
+        return []
     
     def update_solver_options(self, new_options: Dict[str, Any]):
         """Update solver options and recreate solver function.
