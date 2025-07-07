@@ -81,31 +81,6 @@ def solve(A: BCOO, b: np.ndarray, solver_options: Dict[str, Any] = {}) -> np.nda
     return solution
 
 
-# Backward compatibility alias that supports keyword arguments like test expects
-def solve_jit(A: BCOO, b: np.ndarray, method: str = 'bicgstab', use_precond: bool = True, 
-              tol: float = 1e-10, atol: float = 1e-10, maxiter: int = 10000) -> np.ndarray:
-    """JIT-compiled linear solver (backward compatibility alias for solve).
-    
-    Args:
-        A (BCOO): Sparse system matrix in JAX BCOO format.
-        b (np.ndarray): Right-hand side vector.
-        method (str): Solver method ('bicgstab', 'cg'). Defaults to 'bicgstab'.
-        use_precond (bool): Enable preconditioning. Defaults to True.
-        tol (float): Linear solver tolerance. Defaults to 1e-10.
-        atol (float): Absolute tolerance. Defaults to 1e-10.
-        maxiter (int): Maximum iterations. Defaults to 10000.
-        
-    Returns:
-        np.ndarray: Solution vector x.
-    """
-    solver_options = {
-        'method': method,
-        'precond': use_precond,
-        'tol': tol,
-        'atol': atol,
-        'maxiter': maxiter
-    }
-    return solve(A, b, solver_options)
 
 
 def jax_sparse_direct_solve(A: BCOO, b: np.ndarray) -> np.ndarray:
@@ -151,38 +126,3 @@ def jax_sparse_direct_solve(A: BCOO, b: np.ndarray) -> np.ndarray:
         return solve(A, b, {'method': 'bicgstab', 'precond': True})
 
 
-def jax_iterative_solve(A: BCOO, b: np.ndarray, solver_type: str = 'bicgstab', precond_type: str = 'jacobi') -> np.ndarray:
-    """Solve linear system using JAX iterative solvers.
-    
-    Args:
-        A (BCOO): Sparse system matrix in JAX BCOO format.
-        b (np.ndarray): Right-hand side vector.
-        solver_type (str): Krylov subspace method ('bicgstab', 'cg'). Defaults to 'bicgstab'.
-        precond_type (str): Preconditioner type ('jacobi', 'none'). Defaults to 'jacobi'.
-            
-    Returns:
-        np.ndarray: Solution vector x.
-    """
-    logger.debug(f"JAX Solver - Solving linear system with solver_type = {solver_type}, precond = {precond_type}")
-    
-    # Use the main solve function with appropriate options
-    solver_options = {
-        'method': solver_type,
-        'precond': precond_type != 'none',
-        'tol': 1e-10,
-        'atol': 1e-10,
-        'maxiter': 10000
-    }
-    
-    solution = solve(A, b, solver_options)
-    
-    # Verify convergence
-    residual = A @ solution - b
-    res_norm = np.linalg.norm(residual)
-    logger.debug(f"JAX Solver - Finished solving, linear solve res = {res_norm}")
-    
-    if res_norm > 1e-6:
-        logger.warning(f"JAX linear solver achieved limited convergence with residual = {res_norm}")
-        logger.warning("Accepting solution with limited convergence for ill-conditioned system")
-    
-    return solution

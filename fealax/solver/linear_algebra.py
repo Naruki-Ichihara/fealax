@@ -36,7 +36,7 @@ def jax_get_diagonal(A: BCOO) -> np.ndarray:
 def zero_rows_jax(A: BCOO, row_indices: np.ndarray) -> BCOO:
     """Zero out specified rows AND columns in JAX BCOO matrix and set diagonal entries to 1.0.
     
-    This maintains matrix symmetry for symmetric problems like elasticity.
+    Simplified JAX-compatible implementation using data masking.
     
     Args:
         A (BCOO): Input sparse matrix.
@@ -45,29 +45,21 @@ def zero_rows_jax(A: BCOO, row_indices: np.ndarray) -> BCOO:
     Returns:
         BCOO: Matrix with specified rows and columns zeroed and diagonal entries set to 1.0.
     """
-    # Create mask for entries not in the specified rows OR columns
-    # This maintains symmetry by zeroing both rows and columns
-    row_mask = ~np.isin(A.indices[:, 0], row_indices)
-    col_mask = ~np.isin(A.indices[:, 1], row_indices)
-    mask = row_mask & col_mask
+    # Mark entries that should be zeroed (in constrained rows/columns)
+    row_constrained = np.any(A.indices[:, 0:1] == row_indices[None, :], axis=1)
+    col_constrained = np.any(A.indices[:, 1:2] == row_indices[None, :], axis=1)
+    should_zero = row_constrained | col_constrained
     
-    # Also remove existing diagonal entries in the rows/columns to be zeroed
-    # to avoid duplicate diagonal entries
-    diagonal_mask = (A.indices[:, 0] == A.indices[:, 1])
-    constrained_diagonal_mask = np.isin(A.indices[:, 0], row_indices) & diagonal_mask
-    mask = mask & ~constrained_diagonal_mask
+    # Zero the data for constrained entries but keep the structure
+    modified_data = np.where(should_zero, 0.0, A.data)
     
-    # Filter indices and data
-    new_indices = A.indices[mask, :]
-    new_data = A.data[mask]
-    
-    # Add diagonal entries for the constrained DOFs (exactly 1.0, no duplicates)
+    # Add diagonal entries for constrained DOFs
     diagonal_indices = np.column_stack([row_indices, row_indices])
     diagonal_data = np.ones(len(row_indices))
     
-    # Combine filtered matrix with diagonal entries
-    all_indices = np.vstack([new_indices, diagonal_indices])
-    all_data = np.concatenate([new_data, diagonal_data])
+    # Combine original (modified) entries with diagonal entries
+    all_indices = np.vstack([A.indices, diagonal_indices])
+    all_data = np.concatenate([modified_data, diagonal_data])
     
     return BCOO((all_data, all_indices), shape=A.shape)
 

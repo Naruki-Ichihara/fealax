@@ -63,12 +63,10 @@ from fealax.solver.linear_solvers import (
 # Import Newton solver functions from refactored module
 from fealax.solver.newton_solvers import (
     newton_solve,
-    _solver,
-    _jit_solver,
     linear_incremental_solver,
     line_search,
     get_A,
-    jit_solver  # alias for backward compatibility
+    extract_solver_data
 )
 
 from jax import config

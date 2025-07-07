@@ -1,48 +1,7 @@
-"""Newton-Raphson solver implementations for nonlinear finite element problems.
+"""Newton-Raphson solver with JAX-compatible control flow.
 
-This module provides comprehensive Newton-Raphson solution algorithms for finite element
-problems, including JIT-compiled versions for optimal performance. It handles nonlinear
-solving using Newton's method, line search algorithms, incremental loading, and various
-Newton iteration strategies.
-
-The module includes:
-    - Main Newton-Raphson solver with multiple compilation strategies
-    - Legacy solver implementations for backward compatibility
-    - JIT-compiled Newton solvers for maximum performance
-    - Line search algorithms for robust nonlinear convergence
-    - Incremental linear solver for Newton updates
-    - Matrix assembly and constraint handling utilities
-    - Automatic differentiation wrappers for sensitivity analysis
-
-Key Functions:
-    newton_solve: Main Newton solver with JIT-ready implementation
-    _solver: Legacy Newton solver implementation
-    _jit_solver: Current JIT-compiled Newton solver implementation
-    linear_incremental_solver: Solve linear system for Newton increment
-    line_search: Perform line search to optimize Newton step size
-    get_A: Construct system matrix with boundary condition enforcement
-    
-Example:
-    Basic Newton-Raphson solver usage:
-    
-    >>> from fealax.solver.newton_solvers import newton_solve
-    >>> from fealax.problem import Problem
-    >>> 
-    >>> # Setup problem (see problem.py documentation)
-    >>> problem = Problem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs)
-    >>> 
-    >>> # Solve with Newton-Raphson method
-    >>> solver_options = {'tol': 1e-6, 'precond': True}
-    >>> solution = newton_solve(problem, solver_options)
-    
-    Using JIT compilation for better performance:
-    
-    >>> solver_options = {'tol': 1e-8}
-    >>> solution = newton_solve(problem, solver_options)
-
-Note:
-    This module requires JAX for automatic differentiation and linear algebra.
-    GPU acceleration is available through JAX when configured properly.
+This module provides the core Newton-Raphson solver for nonlinear finite element problems
+with JAX-compatible control flow structures for optimal performance and differentiability.
 """
 
 import jax
@@ -54,44 +13,39 @@ from typing import Dict, List, Optional, Callable, Union, Tuple, Any
 import gc
 
 from fealax import logger
-# linear_solver import removed - using solve() instead
 from .linear_algebra import jax_get_diagonal, zero_rows_jax, jax_matrix_multiply, array_to_jax_vec
 from .boundary_conditions import apply_bc_vec, apply_bc, assign_bc, copy_bc, get_flatten_fn, jit_apply_bc_vec
 from .jit_solvers import (
-    jit_newton_step_bicgstab_precond,
-    jit_newton_step_bicgstab_no_precond,
-    jit_newton_step_sparse,
-    jit_newton_step_full,
     jit_newton_step,
     jit_residual_norm
 )
-# extract_solver_data is defined below to avoid circular imports
 
 from jax import config
 config.update("jax_enable_x64", True)
 CHUNK_SIZE = 100000000
 
 
-def linear_incremental_solver(problem: Any, res_vec: np.ndarray, A: BCOO, dofs: np.ndarray, solver_options: Dict[str, Any]) -> np.ndarray:
+def linear_incremental_solver(
+    problem: Any, 
+    res_vec: np.ndarray, 
+    A: BCOO, 
+    dofs: np.ndarray, 
+    solver_options: Dict[str, Any]
+) -> np.ndarray:
     """Solve linear system for Newton-Raphson increment.
     
     Computes the Newton increment by solving the linearized system at each
     Newton iteration. Handles constraint enforcement and optional line search.
     
     Args:
-        problem (Problem): Finite element problem instance.
-        res_vec (np.ndarray): Current residual vector.
-        A (BCOO): Jacobian matrix at current solution state.
-        dofs (np.ndarray): Current solution degrees of freedom.
-        solver_options (dict): Solver configuration options.
+        problem: Finite element problem instance.
+        res_vec: Current residual vector.
+        A: Jacobian matrix at current solution state.
+        dofs: Current solution degrees of freedom.
+        solver_options: Solver configuration options.
         
     Returns:
-        np.ndarray: Updated solution after applying Newton increment.
-        
-    Note:
-        The function automatically constructs appropriate initial guesses
-        that satisfy boundary conditions and handles prolongation matrices
-        for constrained problems.
+        Updated solution after applying Newton increment.
     """
     logger.debug(f"Solving linear system...")
     b = -res_vec
@@ -108,41 +62,36 @@ def linear_incremental_solver(problem: Any, res_vec: np.ndarray, A: BCOO, dofs: 
     from .linear_solvers import solve
     inc = solve(A, b, solver_options)
 
-    line_search_flag = (
-        solver_options["line_search_flag"]
-        if "line_search_flag" in solver_options
-        else False
+    line_search_flag = solver_options.get("line_search_flag", False)
+    
+    def with_line_search():
+        return line_search(problem, dofs, inc)
+    
+    def without_line_search():
+        return dofs + inc
+    
+    dofs = jax.lax.cond(
+        line_search_flag,
+        with_line_search,
+        without_line_search
     )
-    if line_search_flag:
-        dofs = line_search(problem, dofs, inc)
-    else:
-        dofs = dofs + inc
 
     return dofs
 
 
 def line_search(problem: Any, dofs: np.ndarray, inc: np.ndarray) -> np.ndarray:
-    """Perform line search to optimize Newton step size.
+    """Perform line search to optimize Newton step size using JAX while_loop.
     
-    Implements a simple backtracking line search to find an optimal step size
-    along the Newton direction. Particularly useful for finite deformation
-    problems and nonlinear material behavior.
+    Implements a backtracking line search with JAX-compatible control flow
+    to find an optimal step size along the Newton direction.
     
     Args:
-        problem (Problem): Finite element problem instance.
-        dofs (np.ndarray): Current solution degrees of freedom.
-        inc (np.ndarray): Newton increment direction.
+        problem: Finite element problem instance.
+        dofs: Current solution degrees of freedom.
+        inc: Newton increment direction.
         
     Returns:
-        np.ndarray: Updated solution with optimized step size.
-        
-    Note:
-        Uses a simple halving strategy with a maximum of 3 iterations.
-        The implementation is basic and could be enhanced with more
-        sophisticated line search algorithms.
-        
-    Todo:
-        Implement more robust line search methods for finite deformation plasticity.
+        Updated solution with optimized step size.
     """
     res_fn = problem.compute_residual
     res_fn = get_flatten_fn(res_fn, problem)
@@ -152,50 +101,57 @@ def line_search(problem: Any, dofs: np.ndarray, inc: np.ndarray) -> np.ndarray:
         res_vec = res_fn(dofs + alpha * inc)
         return np.linalg.norm(res_vec)
 
-    # grad_res_norm_fn = jax.grad(res_norm_fn)
-    # hess_res_norm_fn = jax.hessian(res_norm_fn)
+    # Use JAX while_loop for line search
+    def line_search_body(state):
+        i, alpha, res_norm, should_continue = state
+        alpha_new = alpha * 0.5
+        res_norm_half = res_norm_fn(alpha_new)
+        
+        # Update state based on whether we found improvement
+        def found_improvement(args):
+            _, alpha_new, res_norm, res_norm_half = args
+            return alpha_new * 2.0, res_norm, False  # Stop and use doubled alpha
+        
+        def continue_search(args):
+            _, alpha_new, res_norm, res_norm_half = args
+            return alpha_new, res_norm_half, True  # Continue with halved alpha
+        
+        alpha_out, res_norm_out, continue_out = jax.lax.cond(
+            res_norm_half > res_norm,
+            found_improvement,
+            continue_search,
+            (i, alpha_new, res_norm, res_norm_half)
+        )
+        
+        return i + 1, alpha_out, res_norm_out, continue_out
+    
+    def line_search_cond(state):
+        i, _, _, should_continue = state
+        return (i < 3) & should_continue
+    
+    # Initial state: (iteration, alpha, res_norm, should_continue)
+    init_state = (0, 1.0, res_norm_fn(1.0), True)
+    _, final_alpha, _, _ = jax.lax.while_loop(
+        line_search_cond, 
+        line_search_body, 
+        init_state
+    )
 
-    # tol = 1e-3
-    # alpha = 1.
-    # lr = 1.
-    # grad_alpha = 1.
-    # while np.abs(grad_alpha) > tol:
-    #     grad_alpha = grad_res_norm_fn(alpha)
-    #     hess_alpha = hess_res_norm_fn(alpha)
-    #     alpha = alpha - 1./hess_alpha*grad_alpha
-    #     print(f"alpha = {alpha}, grad_alpha = {grad_alpha}, hess_alpha = {hess_alpha}")
-
-    alpha = 1.0
-    res_norm = res_norm_fn(alpha)
-    for i in range(3):
-        alpha *= 0.5
-        res_norm_half = res_norm_fn(alpha)
-        logger.debug(f"i = {i}, res_norm = {res_norm}, res_norm_half = {res_norm_half}")
-        if res_norm_half > res_norm:
-            alpha *= 2.0
-            break
-        res_norm = res_norm_half
-
-    return dofs + alpha * inc
+    return dofs + final_alpha * inc
 
 
 def get_A(problem: Any) -> Union[BCOO, Tuple[BCOO, BCOO]]:
     """Construct JAX BCOO matrix with boundary condition enforcement.
     
     Converts the assembled sparse matrix to JAX BCOO format and applies
-    boundary condition enforcement via row elimination. Handles
-    prolongation matrices for constraint enforcement.
+    boundary condition enforcement via row elimination.
     
     Args:
-        problem (Problem): Finite element problem with assembled sparse matrix.
+        problem: Finite element problem with assembled sparse matrix.
         
     Returns:
-        BCOO or Tuple[BCOO, BCOO]: System matrix. If prolongation
-            matrix is present, returns both original and reduced matrices.
-            
-    Note:
-        The function zeros out rows corresponding to Dirichlet boundary
-        conditions and applies prolongation operations for multipoint constraints.
+        System matrix. If prolongation matrix is present, returns both 
+        original and reduced matrices.
     """
     A = problem.csr_array
     logger.info(
@@ -203,7 +159,7 @@ def get_A(problem: Any) -> Union[BCOO, Tuple[BCOO, BCOO]]:
     )
 
     # Collect all row indices to zero out
-    rows_to_zero = []
+    row_index_arrays = []
     for ind, fe in enumerate(problem.fes):
         for i in range(len(fe.node_inds_list)):
             row_inds = np.array(
@@ -212,11 +168,12 @@ def get_A(problem: Any) -> Union[BCOO, Tuple[BCOO, BCOO]]:
                 + problem.offset[ind],
                 dtype=np.int32,
             )
-            rows_to_zero.extend(row_inds)
+            row_index_arrays.append(row_inds)
     
-    # Zero out the rows
-    if rows_to_zero:
-        A = zero_rows_jax(A, np.array(rows_to_zero))
+    # Apply boundary conditions to matrix (re-enabled)
+    if row_index_arrays:
+        rows_to_zero = np.concatenate(row_index_arrays)
+        A = zero_rows_jax(A, rows_to_zero)
 
     # Linear multipoint constraints
     if problem.prolongation_matrix is not None:
@@ -233,8 +190,8 @@ def get_A(problem: Any) -> Union[BCOO, Tuple[BCOO, BCOO]]:
 def extract_solver_data(problem: Any) -> Tuple[np.ndarray, np.ndarray]:
     """Extract JIT-compatible data from problem after setup.
     
-    This function pre-computes all boundary condition and matrix data that
-    cannot be JIT compiled, returning JIT-compatible arrays and functions.
+    Pre-computes all boundary condition data that cannot be JIT compiled,
+    returning JIT-compatible arrays.
     
     Args:
         problem: Finite element problem (after setup/BC computation)
@@ -255,35 +212,44 @@ def extract_solver_data(problem: Any) -> Tuple[np.ndarray, np.ndarray]:
             vec_inds = fe.vec_inds_list[i]
             global_dof_inds = node_inds * fe.vec + vec_inds
             
-            bc_indices_list.extend(global_dof_inds.tolist())
-            bc_values_list.extend(fe.vals_list[i].tolist())
+            # Use JAX arrays directly without .tolist()
+            bc_indices_list.append(global_dof_inds)
+            bc_values_list.append(fe.vals_list[i])
     
-    bc_indices = np.array(bc_indices_list, dtype=np.int32)
-    bc_values = np.array(bc_values_list)
+    # Concatenate arrays instead of using .tolist()
+    if bc_indices_list:
+        bc_indices = np.concatenate(bc_indices_list).astype(np.int32)
+        bc_values = np.concatenate(bc_values_list)
+    else:
+        bc_indices = np.array([], dtype=np.int32)
+        bc_values = np.array([])
     
     return bc_indices, bc_values
 
 
-################################################################################
-# JIT-compatible solver functions are now imported from jit_solvers module
-
-
-def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:
-    """JIT-compatible solver that separates setup from core iteration.
+def newton_solve(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:
+    """Newton-Raphson solver with JAX-compatible control flow.
     
-    This is the current JIT solver implementation used by newton_solve().
-    
-    This solver pre-computes all boundary conditions and problem setup outside
-    of JIT, then uses JIT-compiled functions for the Newton iteration loop.
+    This solver separates JIT-compilable operations from assembly/setup operations
+    to maximize performance while maintaining compatibility with JAX transformations.
     
     Args:
-        problem: Finite element problem instance
-        solver_options: Solver configuration
-        
+        problem: Finite element problem instance.
+        solver_options: Solver configuration options.
+            - tol: Absolute convergence tolerance (default: 1e-6)
+            - rel_tol: Relative convergence tolerance (default: 1e-8)
+            - max_iter: Maximum Newton iterations (default: 50)
+            - method: Linear solver method (default: 'bicgstab')
+            - precond: Enable preconditioning (default: True)
+            - line_search_flag: Enable line search (default: False)
+            
     Returns:
-        Solution list
+        Solution list with converged degrees of freedom.
+        
+    Example:
+        >>> solution = newton_solve(problem, {'tol': 1e-6, 'precond': True})
     """
-    # Removed logging for vmap compatibility
+    logger.debug("Using Newton solver with JAX-compatible control flow")
     start = time.time()
     
     # Get tolerances
@@ -334,250 +300,70 @@ def _jit_solver(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.nd
     
     # Initial residual computation (not JIT)
     res_vec, A = compute_residual_and_matrix(dofs)
-    res_val_initial = jit_residual_norm(res_vec)  # Keep as JAX array for vmap compatibility
-    res_val = res_val_initial
+    res_val_initial = jit_residual_norm(res_vec)
     
-    # Handle case where initial residual is already very small
-    # Use jax.lax.cond for vmap compatibility instead of Python if
-    def converged_immediately(args):
-        dofs, problem = args
-        if problem.prolongation_matrix is not None:
-            dofs = problem.prolongation_matrix @ dofs
-            
-        if problem.macro_term is not None:
-            dofs = dofs + problem.macro_term
-            
-        sol_list = problem.unflatten_fn_sol_list(dofs)
-        return sol_list
-    
-    def continue_iteration(args):
-        dofs, problem = args
-        return dofs  # Will continue to iteration loop
-    
-    # Check if already converged (vmap compatible)
-    is_converged = res_val_initial < tol
-    
-    # Handle early convergence (vmap compatible)
-    if hasattr(res_val_initial, 'shape'):
-        # We're in a JAX context (possibly vmap), handle differently
-        # Don't use early return for vmap compatibility
-        pass
-    else:
-        # Traditional path - check for immediate convergence
-        res_val_float = float(res_val_initial)
-        if res_val_float < tol:
-            # Solution is already converged
-            if problem.prolongation_matrix is not None:
-                dofs = problem.prolongation_matrix @ dofs
-                
-            if problem.macro_term is not None:
-                dofs = dofs + problem.macro_term
-                
-            sol_list = problem.unflatten_fn_sol_list(dofs)
-            return sol_list
-    
-    # Newton iteration loop
+    # Newton iteration with JAX-compatible control flow
     max_iter = solver_options.get("max_iter", 50)
-    iteration = 0
     
-    while iteration < max_iter:
-        # Check convergence - use float conversion only outside vmap context
-        try:
-            # Try to convert to float for convergence check
-            if hasattr(res_val, 'shape'):
-                # In JAX context, use JAX operations for convergence check
-                if hasattr(res_val_initial, 'shape') and np.any(res_val_initial > 0):
-                    rel_res_val = res_val / res_val_initial
-                    converged = (rel_res_val <= rel_tol) | (res_val <= tol)
-                else:
-                    converged = res_val <= tol
-                
-                # Convert to boolean for Python while loop
-                # This might still cause issues in vmap context
-                if float(converged) > 0.5:
-                    break
-            else:
-                # Traditional convergence check
-                res_val_float = float(res_val)
-                res_val_initial_float = float(res_val_initial)
-                
-                if res_val_initial_float > 0:
-                    rel_res_val = res_val_float / res_val_initial_float
-                    converged = (rel_res_val <= rel_tol) or (res_val_float <= tol)
-                else:
-                    converged = res_val_float <= tol
-                    
-                if converged:
-                    break
-        except:
-            # If conversion fails (vmap context), just do one more iteration
-            pass
+    # Initial state for while loop
+    initial_state = (dofs, res_vec, A, res_val_initial, 0)  # (dofs, res_vec, A, res_val, iteration)
+    
+    def newton_condition(state):
+        """Condition function for Newton while loop."""
+        dofs, res_vec, A, res_val, iteration = state
+        
+        # Check convergence using JAX control flow
+        def check_relative_convergence():
+            rel_res_val = res_val / res_val_initial
+            return (rel_res_val <= rel_tol) | (res_val <= tol)
+        
+        def check_absolute_convergence():
+            return res_val <= tol
             
-        # JIT-compiled Newton step
-        dofs = jit_newton_step(dofs, A, res_vec, solver_options)
+        converged = jax.lax.cond(
+            res_val_initial > 0,
+            check_relative_convergence,
+            check_absolute_convergence
+        )
         
-        # Re-compute residual and matrix (not JIT)
-        res_vec, A = compute_residual_and_matrix(dofs)
-        res_val = jit_residual_norm(res_vec)  # Keep as JAX array for vmap compatibility
-        
-        # Removed logging for vmap compatibility
-        iteration += 1
+        # Continue if not converged and within max iterations
+        return ~converged & (iteration < max_iter)
     
-    # Finalize solution
+    def newton_body(state):
+        """Body function for Newton while loop."""
+        dofs, res_vec, A, res_val, iteration = state
+        
+        # JIT-compiled Newton step
+        new_dofs = jit_newton_step(dofs, A, res_vec, solver_options)
+        
+        # Re-compute residual and matrix (not JIT-compiled due to assembly operations)
+        new_res_vec, new_A = compute_residual_and_matrix(new_dofs)
+        new_res_val = jit_residual_norm(new_res_vec)
+        
+        return (new_dofs, new_res_vec, new_A, new_res_val, iteration + 1)
+    
+    # Check for early convergence before starting iterations
+    def run_iterations():
+        final_state = jax.lax.while_loop(newton_condition, newton_body, initial_state)
+        return final_state[0]  # Return final dofs
+        
+    def early_convergence():
+        return dofs  # Already converged
+    
+    # Use JAX cond to decide whether to run iterations
+    converged_early = res_val_initial < tol
+    final_dofs = jax.lax.cond(converged_early, early_convergence, run_iterations)
+    
+    # Apply post-processing (using Python if since these are setup-time decisions)
     if problem.prolongation_matrix is not None:
-        dofs = problem.prolongation_matrix @ dofs
+        final_dofs = problem.prolongation_matrix @ final_dofs
         
     if problem.macro_term is not None:
-        dofs = dofs + problem.macro_term
-        
-    sol_list = problem.unflatten_fn_sol_list(dofs)
+        final_dofs = final_dofs + problem.macro_term
     
-    # Removed timing and logging for vmap compatibility
+    sol_list = problem.unflatten_fn_sol_list(final_dofs)
+    
+    end = time.time()
+    logger.debug(f"Newton solver completed in {end - start:.4f} seconds")
+    
     return sol_list
-
-
-# Legacy _solver function removed - use newton_solve() instead
-
-
-# jit_newton_step_full is now imported from jit_solvers module
-
-
-# Legacy hybrid and pure JIT functions removed - use _jit_solver instead
-
-
-
-
-def newton_solve(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.ndarray]:
-    """JIT-compiled Newton solver for nonlinear finite element problems.
-    
-    This solver uses JIT compilation for optimal performance. All linear algebra
-    operations are JIT-compiled while assembly remains outside JIT boundary.
-    
-    Args:
-        problem (Problem): Finite element problem instance.
-        solver_options (dict, optional): Solver configuration. Defaults to {}.
-            Available options:
-            - tol (float): Absolute convergence tolerance (default: 1e-6)
-            - rel_tol (float): Relative convergence tolerance (default: 1e-8)
-            - max_iter (int): Maximum Newton iterations (default: 20)
-            - method (str): Linear solver method (default: 'bicgstab')
-            - precond (bool): Enable preconditioning (default: True)
-            - linear_tol (float): Linear solver tolerance (default: 1e-10)
-            - linear_atol (float): Linear solver absolute tolerance (default: 1e-10)
-            - linear_maxiter (int): Linear solver max iterations (default: 10000)
-            
-    Returns:
-        List[np.ndarray]: Solution list with converged degrees of freedom.
-        
-    Example:
-        Basic usage:
-        >>> solution = newton_solve(problem, {
-        ...     'tol': 1e-6, 
-        ...     'precond': True
-        ... })
-    """
-    logger.debug("Using JIT-compiled Newton solver")
-    # Always use JIT solver for optimal performance
-    return _jit_solver(problem, solver_options)
-
-
-def _gradient_solver(problem: Any, converged_solution: List[np.ndarray], v_list: List[np.ndarray], solver_options: Dict[str, Any] = {}) -> Any:
-    """Vmap-compatible gradient solver that reuses assembled system from forward pass.
-    
-    This solver computes gradients by reusing the Jacobian matrix that was already
-    assembled during the forward solve, making it much faster and vmap-compatible
-    since it skips the complex assembly process.
-    
-    Args:
-        problem (Problem): Finite element problem (with cached assembled system).
-        converged_solution (List[np.ndarray]): Solution from forward pass.
-        v_list (List[np.ndarray]): Vector for vector-Jacobian product.
-        solver_options (dict, optional): Solver options.
-        
-    Returns:
-        Gradients with respect to problem parameters.
-        
-    Note:
-        This function assumes the problem has already been solved and the system
-        matrices are cached/available for reuse.
-    """
-    
-    # Get the cached Jacobian matrix from the forward solve
-    # The problem should have the assembled system cached
-    A_result = get_A(problem)
-    if problem.prolongation_matrix is not None:
-        A, A_reduced = A_result
-    else:
-        A = A_result
-        A_reduced = A
-    
-    # Convert v_list to vector form
-    v_vec = jax.flatten_util.ravel_pytree(v_list)[0]
-    
-    if problem.prolongation_matrix is not None:
-        v_vec = problem.prolongation_matrix.T @ v_vec
-    
-    # Create transpose matrix for adjoint solve
-    from jax.experimental.sparse import BCOO
-    A_reduced_T = BCOO((A_reduced.data, A_reduced.indices[:, np.array([1, 0])]), 
-                       shape=(A_reduced.shape[1], A_reduced.shape[0]))
-    
-    # Solve adjoint system: A^T λ = v
-    from .linear_solvers import solve
-    adjoint_options = solver_options.copy()
-    adjoint_vec = solve(A_reduced_T, v_vec, adjoint_options)
-    
-    if problem.prolongation_matrix is not None:
-        adjoint_vec = problem.prolongation_matrix @ adjoint_vec
-    
-    # Compute parameter sensitivities using cached solution and adjoint vector
-    def constraint_fn(params):
-        """Constraint function that computes residual for given parameters."""
-        # This is the key optimization: we reuse the solution structure
-        # and only recompute parameter-dependent parts
-        problem.set_params(params)
-        
-        # Recompute only the parameter-dependent residual terms
-        # This should be much faster than full assembly
-        res_fn = problem.compute_residual
-        from .boundary_conditions import get_flatten_fn, apply_bc
-        res_fn = get_flatten_fn(res_fn, problem)
-        res_fn = apply_bc(res_fn, problem)
-        
-        # Use the converged solution to evaluate residual at solution point
-        dofs = jax.flatten_util.ravel_pytree(converged_solution)[0]
-        return res_fn(dofs)
-    
-    # Convert to solution list format
-    def constraint_fn_sol_to_sol(params):
-        con_vec = constraint_fn(params)
-        return problem.unflatten_fn_sol_list(con_vec)
-    
-    # We need to compute VJP w.r.t. parameters
-    # Since we don't have get_current_params, we'll work with the parameter structure
-    # that was passed to set_params
-    
-    # Get current parameter values by looking at problem attributes
-    # This is a simplified approach - in practice, problems store params differently
-    current_params = {}
-    if hasattr(problem, 'E'):
-        current_params['E'] = problem.E
-    if hasattr(problem, 'nu'):
-        current_params['nu'] = problem.nu
-    
-    # Compute VJP: -λ^T (∂c/∂p)
-    _, f_vjp = jax.vjp(constraint_fn_sol_to_sol, current_params)
-    adjoint_sol_list = problem.unflatten_fn_sol_list(adjoint_vec)
-    (vjp_result,) = f_vjp(adjoint_sol_list)
-    
-    # Return negative (adjoint method convention)
-    vjp_result = jax.tree_map(lambda x: -x, vjp_result)
-    
-    return vjp_result
-
-
-# Aliases for backward compatibility
-jit_solver = _jit_solver
-
-
-# Legacy pure JIT compilation removed

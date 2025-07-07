@@ -862,24 +862,6 @@ class Problem:
             apply_bcs=apply_bcs
         )
 
-    def assemble_system(self, dofs: np.ndarray) -> dict:
-        """Legacy method for backward compatibility.
-        
-        This method maintains the old interface for existing code while
-        using the new assemble() method internally.
-        
-        Args:
-            dofs (np.ndarray): Current solution degrees of freedom vector.
-            
-        Returns:
-            dict: Dictionary containing assembled system data.
-        """
-        return AssemblyManager.assemble_system(
-            dofs=dofs,
-            assemble_fn=self.assemble,
-            precompute_bc_data_fn=self.precompute_bc_data,
-            has_prolongation=self.prolongation_matrix is not None
-        )
 
     def apply_bcs_to_assembled_system(self, A: BCOO, b: np.ndarray, bc_data: dict) -> tuple:
         """Apply boundary conditions to an assembled finite element system.

@@ -30,7 +30,6 @@ import jax
 from fealax.mesh import box_mesh
 from fealax.problem import Problem, DirichletBC
 from fealax.solver import NewtonSolver
-from fealax.utils import save_as_vtk
 
 
 def create_mesh(nx=15, ny=15, nz=15):
@@ -159,28 +158,9 @@ def main():
     print(f"Applied compression: 5% (0.05 m)")
     print(f"Material: E = {material_params['E']/1e9:.0f} GPa, ν = {material_params['nu']}")
     
-    # Save results for visualization
-    print("Saving results to VTK format...")
-        
-    # Create VTK helper object
-    class VTKHelper:
-        def __init__(self, mesh, ele_type):
-            self.points = mesh.points
-            self.cells = mesh.cells
-            self.ele_type = ele_type
-            self.num_cells = mesh.cells.shape[0]
-            
-    vtk_helper = VTKHelper(mesh, "HEX8")
-            
-    # Prepare data for visualization
-    point_data = [
-        ("displacement", displacements)
-    ]
-            
-    # Save to VTK file
-    import os
-    vtk_filename = os.path.join(os.getcwd(), "simple_elasticity_results.vtu")
-    save_as_vtk(vtk_helper, vtk_filename, point_infos=point_data)
+    # Skip VTK saving for now
+    # print("Saving results to VTK format...")
+    print("VTK saving skipped")
     
     print("Example completed successfully!")
     

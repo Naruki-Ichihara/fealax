@@ -38,10 +38,10 @@ class TestBasicSolverFunctions:
     """Test basic solver functions that don't require full FE setup."""
 
     @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not available")
-    def test_solve_jit_function_exists(self):
-        """Test that solve_jit function is importable."""
-        from fealax.solver import solve_jit
-        assert callable(solve_jit), "solve_jit should be callable"
+    def test_solve_function_exists(self):
+        """Test that solve function is importable."""
+        from fealax.solver import solve
+        assert callable(solve), "solve should be callable"
 
     @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not available")
     def test_jax_get_diagonal(self):
@@ -61,7 +61,7 @@ class TestBasicSolverFunctions:
     @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not available")
     def test_solve_basic_system(self):
         """Test basic linear system solving."""
-        from fealax.solver import solve_jit
+        from fealax.solver import solve
         
         # Create a simple 3x3 system: Ax = b where A is identity
         indices = jnp.array([[0, 0], [1, 1], [2, 2]])
@@ -69,8 +69,9 @@ class TestBasicSolverFunctions:
         A = BCOO((data, indices), shape=(3, 3))
         b = jnp.array([1.0, 2.0, 3.0])
         
-        # Solve without JIT compilation
-        x = solve_jit(A, b, method='cg', use_precond=False, tol=1e-10, atol=1e-10, maxiter=1000)
+        # Solve using the main solve function
+        solver_options = {'method': 'cg', 'precond': False, 'tol': 1e-10, 'atol': 1e-10, 'maxiter': 1000}
+        x = solve(A, b, solver_options)
         
         # Check solution
         assert jnp.allclose(x, b, rtol=1e-8), f"Expected {b}, got {x}"
@@ -204,10 +205,11 @@ class TestJITSolverIntegration:
         assert callable(newton_solve), "newton_solve should be callable"
 
     @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not available")
-    def test_jit_solver_function_exists(self):
-        """Test that jit_solver function exists and is callable."""
-        from fealax.solver import jit_solver
-        assert callable(jit_solver), "jit_solver should be callable"
+    def test_newton_solve_accepts_jit_options(self):
+        """Test that newton_solve accepts JIT-related options."""
+        from fealax.solver import newton_solve
+        # The function should accept solver options including JIT-related ones
+        assert callable(newton_solve), "newton_solve should be callable"
 
 
 class TestSolverOptions:

@@ -82,11 +82,11 @@ def _differentiable_solver(problem: Any, solver_options: Dict[str, Any] = {}) ->
     
     def solver_fn(params):
         # Import locally to avoid circular imports
-        from .newton_solvers import _jit_solver
+        from .newton_solvers import newton_solve
         
         # Set parameters and solve
         problem.set_params(params)
-        sol_list = _jit_solver(problem, solver_options)
+        sol_list = newton_solve(problem, solver_options)
         return sol_list
     
     logger.debug("Differentiable solver created - JAX handles AD automatically")

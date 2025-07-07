@@ -14,19 +14,15 @@ for convenience and backward compatibility.
 # Import all linear solver functions
 from .linear_solvers import (
     jax_sparse_direct_solve,
-    jax_iterative_solve,
-    solve,
-    solve_jit  # alias for solve
+    solve
 )
 
 # Import all Newton solver functions
 from .newton_solvers import (
     newton_solve,
-    _jit_solver,
     linear_incremental_solver,
     line_search,
     get_A,
-    jit_solver,  # alias for backward compatibility
     extract_solver_data
 )
 
@@ -75,10 +71,8 @@ from .newton_wrapper import (
 # Export list for clarity
 __all__ = [
     # Linear solvers
-    'jax_sparse_direct_solve', 
-    'jax_iterative_solve',
+    'jax_sparse_direct_solve',
     'solve',
-    'solve_jit',
     
     # Newton solvers
     'newton_solve',

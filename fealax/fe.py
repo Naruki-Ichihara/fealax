@@ -263,11 +263,14 @@ class FiniteElement:
                         f"Wrong number of arguments for location_fn: must be 1 or 2, get {num_args}"
                     )
 
-                node_inds = np.argwhere(
-                    jax.vmap(location_fn)(
-                        self.mesh.points, np.arange(self.num_total_nodes)
-                    )
-                ).reshape(-1)
+                condition = jax.vmap(location_fn)(
+                    self.mesh.points, np.arange(self.num_total_nodes)
+                )
+                # Use native JAX argwhere with size parameter for JIT compatibility
+                node_inds_padded = np.argwhere(condition, size=self.num_total_nodes, fill_value=-1)
+                # Count valid entries and slice to avoid boolean indexing
+                num_valid = np.sum(node_inds_padded[:, 0] >= 0)
+                node_inds = node_inds_padded[:num_valid, 0]
                 vec_inds = np.ones_like(node_inds, dtype=np.int32) * vecs[i]
                 values = jax.vmap(value_fns[i])(
                     self.mesh.points[node_inds].reshape(-1, self.dim)
@@ -340,7 +343,12 @@ class FiniteElement:
 
                 vvmap_on_boundary = jax.vmap(jax.vmap(on_boundary))
                 boundary_flags = vvmap_on_boundary(cell_face_points, cell_face_inds)
-                boundary_inds = np.argwhere(boundary_flags)  # (num_selected_faces, 2)
+                # Use native JAX argwhere with size parameter for JIT compatibility
+                max_boundary_faces = boundary_flags.size
+                boundary_inds_padded = np.argwhere(boundary_flags, size=max_boundary_faces, fill_value=-1)
+                # Count valid entries and slice to avoid boolean indexing
+                num_valid = np.sum(boundary_inds_padded[:, 0] >= 0)
+                boundary_inds = boundary_inds_padded[:num_valid]  # (num_selected_faces, 2)
                 boundary_inds_list.append(boundary_inds)
 
         return boundary_inds_list
@@ -402,42 +410,3 @@ class FiniteElement:
         u_grads = np.sum(u_grads, axis=2)  # (num_cells, num_quads, vec, dim)
         return u_grads
 
-    def print_BC_info(self) -> None:
-        """Print boundary condition information for debugging purposes.
-
-        Todo:
-            This method is not working properly and needs to be fixed.
-        """
-        if hasattr(self, "neumann_boundary_inds_list"):
-            print("\n\n### Neumann B.C. is specified")
-            for i in range(len(self.neumann_boundary_inds_list)):
-                print(f"\nNeumann Boundary part {i + 1} information:")
-                print(self.neumann_boundary_inds_list[i])
-                print(
-                    f"Array.shape = (num_selected_faces, 2) = {self.neumann_boundary_inds_list[i].shape}"
-                )
-                print("Interpretation:")
-                print(
-                    "    Array[i, 0] returns the global cell index of the ith selected face"
-                )
-                print(
-                    "    Array[i, 1] returns the local face index of the ith selected face"
-                )
-        else:
-            print("\n\n### No Neumann B.C. found.")
-
-        if len(self.node_inds_list) != 0:
-            print("\n\n### Dirichlet B.C. is specified")
-            for i in range(len(self.node_inds_list)):
-                print(f"\nDirichlet Boundary part {i + 1} information:")
-                bc_array = np.stack(
-                    [self.node_inds_list[i], self.vec_inds_list[i], self.vals_list[i]]
-                ).T
-                print(bc_array)
-                print(f"Array.shape = (num_selected_dofs, 3) = {bc_array.shape}")
-                print("Interpretation:")
-                print("    Array[i, 0] returns the node index of the ith selected dof")
-                print("    Array[i, 1] returns the vec index of the ith selected dof")
-                print("    Array[i, 2] returns the value assigned to ith selected dof")
-        else:
-            print("\n\n### No Dirichlet B.C. found.")
