@@ -65,6 +65,10 @@ def _differentiable_solver(problem: Any, solver_options: Dict[str, Any] = {}) ->
     differentiation through the Newton-Raphson solver. This approach is simpler
     and more accurate than complex custom VJP implementations.
     
+    The solver may encounter tracer leaks when used with vmap due to state modifications
+    in the problem object. When this occurs, the NewtonSolver wrapper will automatically
+    fall back to sequential solving to maintain correctness.
+    
     Args:
         problem (Problem): Finite element problem template.
         solver_options (dict, optional): Options for Newton solver. Defaults to {}.
@@ -85,6 +89,8 @@ def _differentiable_solver(problem: Any, solver_options: Dict[str, Any] = {}) ->
         from .newton_solvers import newton_solve
         
         # Set parameters and solve
+        # Note: This may cause tracer leaks in vmap contexts due to state modification
+        # The NewtonSolver wrapper handles this by falling back to sequential solving
         problem.set_params(params)
         sol_list = newton_solve(problem, solver_options)
         return sol_list

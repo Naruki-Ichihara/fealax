@@ -197,9 +197,11 @@ class Problem:
             return np.hstack(inds)
 
         # (num_cells, num_nodes*vec + ...)
-        inds = np.array(jax.vmap(find_ind)(*self.cells_list))
-        self.I = np.repeat(inds[:, :, None], inds.shape[1], axis=2).reshape(-1)
-        self.J = np.repeat(inds[:, None, :], inds.shape[1], axis=1).reshape(-1)
+        # Force computation on CPU to avoid GPU memory issues for large meshes
+        with jax.default_device(jax.devices("cpu")[0]):
+            inds = np.array(jax.vmap(find_ind)(*self.cells_list))
+            self.I = np.repeat(inds[:, :, None], inds.shape[1], axis=2).reshape(-1)
+            self.J = np.repeat(inds[:, None, :], inds.shape[1], axis=1).reshape(-1)
         self.cells_list_face_list = []
 
         for i, boundary_inds in enumerate(self.boundary_inds_list):

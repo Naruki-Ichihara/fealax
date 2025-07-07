@@ -73,8 +73,9 @@ def jit_newton_step_bicgstab_precond(dofs: np.ndarray, A: BCOO, res_vec: np.ndar
     """
     neg_res = -res_vec
     jacobi = jax_get_diagonal(A)
-    # Safe division for preconditioning
-    safe_jacobi = np.where(np.abs(jacobi) > 1e-12, jacobi, 1.0)
+    # Safe division for preconditioning with proper scaling
+    jacobi_max = np.max(np.abs(jacobi))
+    safe_jacobi = np.where(np.abs(jacobi) > jacobi_max * 1e-8, jacobi, np.sign(jacobi) * jacobi_max * 1e-8)
     pc = lambda x: x / safe_jacobi
     
     delta_dofs, _ = jax.scipy.sparse.linalg.bicgstab(

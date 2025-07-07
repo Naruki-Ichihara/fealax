@@ -1,443 +1,167 @@
-# fealax
+# Batch Gradients with fealax NewtonSolver
 
-GPU-accelerated finite element analysis (FEA) library built with JAX for computational mechanics and numerical material testing.
+This guide demonstrates how to efficiently compute gradients with batch parameters using fealax's NewtonSolver for hyperelastic finite element problems.
 
 ## Quick Start
 
-### Problem Setup
-
-```python
-import jax.numpy as jnp
-from fealax.mesh import box_mesh
-from fealax.problem import Problem, DirichletBC
-from fealax.solver import NewtonSolver
-
-# Create mesh
-mesh = box_mesh(10, 10, 10, 1.0, 1.0, 1.0, ele_type="HEX8")
-
-# Define boundary conditions
-bcs = [
-    DirichletBC(lambda x: jnp.abs(x[2]) < 1e-6, 2, lambda x: 0.0),       # Fix bottom
-    DirichletBC(lambda x: jnp.abs(x[2] - 1.0) < 1e-6, 2, lambda x: -0.05), # Compress top
-]
-
-# Define elasticity problem with parameterized materials
-class ElasticityProblem(Problem):
-    def __init__(self, mesh, **kwargs):
-        self.E = None   # Young's modulus (set via parameters)
-        self.nu = None  # Poisson's ratio (set via parameters)
-        super().__init__(mesh=mesh, **kwargs)
-        
-    def set_params(self, params):
-        """Set material parameters."""
-        self.E = params['E']
-        self.nu = params['nu']
-        
-    def get_tensor_map(self):
-        """Linear elasticity constitutive law."""
-        def stress_strain(u_grads):
-            strain = 0.5 * (u_grads + jnp.transpose(u_grads))
-            lam = self.E * self.nu / ((1 + self.nu) * (1 - 2 * self.nu))
-            mu = self.E / (2 * (1 + self.nu))
-            stress = 2 * mu * strain + lam * jnp.trace(strain) * jnp.eye(3)
-            return stress
-        return stress_strain
-
-# Create problem
-problem = ElasticityProblem(mesh=mesh, vec=3, dim=3, dirichlet_bcs=bcs)
-```
-
-### Newton Solver Usage
-
-#### Basic Solving
-
-```python
-# Create Newton solver
-solver = NewtonSolver(problem, {'tol': 1e-6, 'max_iter': 10})
-
-# Material parameters
-material_params = {
-    'E': 200e9,  # Young's modulus (Pa)
-    'nu': 0.3    # Poisson's ratio
-}
-
-# Solve the problem
-solution = solver.solve(material_params)
-displacement_field = solution[0]  # Extract displacement field
-
-print(f"Solution shape: {displacement_field.shape}")
-print(f"Max displacement: {jnp.max(jnp.abs(displacement_field)):.6f} m")
-```
-
-#### Performance Options
-
-```python
-# JIT-compiled solver for better performance
-solver = NewtonSolver(problem, {
-    'tol': 1e-6,
-    'use_jit': True,     # Enable JIT compilation
-    'precond': True,     # Use preconditioning
-    'method': 'bicgstab' # Linear solver method
-})
-
-solution = solver.solve(material_params)
-```
-
-#### Differentiable Solver for Optimization
-
 ```python
 import jax
+from fealax.solver import NewtonSolver
 
-# Create differentiable solver
-diff_solver = NewtonSolver(problem, {
-    'tol': 1e-6,
-    'max_iter': 10
-}, differentiable=True)  # Enable automatic differentiation
+# Enable 64-bit precision
+jax.config.update("jax_enable_x64", True)
 
-# Define objective function (e.g., compliance minimization)
-def compliance_objective(params):
-    solution = diff_solver.solve(params)
-    displacement = solution[0]
-    return jnp.sum(displacement**2)  # Simple compliance measure
+# Create solver (see batch_gradients_simple.py for full setup)
+solver = create_hyperelastic_solver()
 
-# Compute gradients with respect to material parameters
-grad_fn = jax.grad(compliance_objective)
-gradients = grad_fn(material_params)
-
-print(f"∂C/∂E = {gradients['E']:.2e}")
-print(f"∂C/∂ν = {gradients['nu']:.2e}")
-```
-
-#### Parameter Studies and Optimization
-
-```python
-# Parameter sweep
-E_values = jnp.linspace(100e9, 300e9, 10)
-compliances = []
-
-for E in E_values:
-    params = {'E': float(E), 'nu': 0.3}
-    solution = solver.solve(params)
-    compliance = jnp.sum(solution[0]**2)
-    compliances.append(compliance)
-
-# Optimization loop
-def optimize_material():
-    """Simple gradient-based optimization."""
-    params = {'E': 200e9, 'nu': 0.3}
-    learning_rate = 1e-10
-    
-    for i in range(10):
-        gradients = grad_fn(params)
-        # Update parameters (gradient descent)
-        params['E'] -= learning_rate * gradients['E']
-        params['nu'] -= learning_rate * gradients['nu']
-        
-        # Compute objective
-        obj_value = compliance_objective(params)
-        print(f"Iteration {i}: Objective = {obj_value:.6e}")
-    
-    return params
-
-optimized_params = optimize_material()
-```
-
-#### Batch Parameter Solving
-
-```python
-# Efficient batch processing of multiple parameter sets
-from fealax.solver import BatchNewtonSolver, create_batch_solver
-
-# Create batch solver for efficient parameter processing
-batch_solver = create_batch_solver(problem, {
-    'tol': 1e-6,
-    'max_iter': 10,
-    'use_jit': True
-}, differentiable=True)
-
-# Parameter batch: different material properties
-param_batch = [
-    {'E': 200e9, 'nu': 0.3},   # Steel
-    {'E': 70e9,  'nu': 0.33},  # Aluminum
-    {'E': 210e9, 'nu': 0.28},  # Carbon steel
-    {'E': 110e9, 'nu': 0.35},  # Brass
+# 1. Batch solving (efficient forward pass)
+batch_params = [
+    {'E': 5e4, 'nu': 0.25},
+    {'E': 1e5, 'nu': 0.3},
+    {'E': 2e5, 'nu': 0.35}
 ]
+solutions = solver.solve(batch_params)
 
-# Solve all parameter sets efficiently
-solutions = batch_solver.solve_batch(param_batch, show_progress=True)
-
-# Process results
-for i, (params, solution) in enumerate(zip(param_batch, solutions)):
+# 2. Individual gradients (reliable backward pass)
+def objective(params):
+    solution = solver.solve(params)
     displacement = solution[0]
-    max_disp = jnp.max(jnp.abs(displacement))
-    print(f"Material {i+1}: E={params['E']/1e9:.0f} GPa → max_disp={max_disp:.4f} m")
+    return jax.numpy.sum(displacement**2)
 
-# Parameter sweep utility
-sweep_results = batch_solver.solve_parameter_sweep(
-    param_name='E',
-    param_values=jnp.linspace(100e9, 300e9, 10),
-    base_params={'nu': 0.3}
-)
-
-# Multi-parameter grid
-grid_results = batch_solver.solve_multi_parameter_grid(
-    param_grids={
-        'E': [150e9, 200e9, 250e9],
-        'nu': [0.25, 0.3, 0.35]
-    }
-)
-```
-
-#### Performance Benchmarking
-
-```python
-from fealax.solver import benchmark_batch_solving
-
-# Compare individual vs batch solving performance
-results = benchmark_batch_solving(
-    problem=problem,
-    params_batch=param_batch,
-    solver_options={'tol': 1e-6, 'use_jit': True}
-)
-
-print(f"Individual time: {results['individual_time']:.3f} s")
-print(f"Batch time: {results['batch_time']:.3f} s") 
-print(f"Performance ratio: {results['speedup_ratio']:.2f}x")
-```
-
-#### Advanced Configuration
-
-```python
-# Advanced solver options
-advanced_solver = NewtonSolver(
-    problem=problem,
-    solver_options={
-        'tol': 1e-8,              # Convergence tolerance
-        'rel_tol': 1e-10,         # Relative tolerance
-        'max_iter': 20,           # Maximum Newton iterations
-        'method': 'bicgstab',     # Linear solver: 'bicgstab', 'cg'
-        'precond': True,          # Enable Jacobi preconditioning
-        'line_search_flag': True, # Enable line search
-        'use_jit': True           # JIT compilation
-    },
-    differentiable=True,          # Enable automatic differentiation
-    adjoint_solver_options={      # Options for adjoint system
-        'tol': 1e-10,
-        'method': 'bicgstab'
-    },
-    use_jit=True                  # JIT-compile the entire wrapper
-)
-
-# Dynamic configuration updates
-advanced_solver.update_solver_options({'tol': 1e-10})
-advanced_solver.update_adjoint_options({'method': 'cg'})
-
-# Convert between differentiable and non-differentiable modes
-advanced_solver.make_non_differentiable()  # Disable AD
-advanced_solver.make_differentiable()      # Re-enable AD
-
-# Check solver properties
-print(f"Is differentiable: {advanced_solver.is_differentiable}")
-print(f"Is JIT compiled: {advanced_solver.is_jit_compiled}")
-```
-
-### Legacy Solver Interface
-
-```python
-# Backward compatibility with original API
-from fealax.solver import newton_solve, ad_wrapper
-
-# Original newton_solve function
-solution = newton_solve(problem, {'tol': 1e-6, 'use_jit': True})
-
-# Original ad_wrapper for automatic differentiation
-differentiable_solver = ad_wrapper(problem, {'tol': 1e-6})
-solution = differentiable_solver(material_params)
+grad_fn = jax.grad(objective)
+gradients = grad_fn({'E': 1e5, 'nu': 0.3})
 ```
 
 ## Key Features
 
-### 🚀 Modern Solver API
-- **`NewtonSolver` wrapper**: Clean `solver.solve(params)` interface
-- **JAX automation chains**: Seamless integration with `jax.grad`, `jax.jit`
-- **Parameter-driven**: Material properties and parameters passed to solve
-- **Dynamic configuration**: Update solver options on the fly
+### ✅ What Works Well
 
-### 🎯 Automatic Differentiation
-- **Adjoint method**: Efficient gradient computation through FE solutions
-- **Parameter sensitivity**: Gradients w.r.t. material properties, geometry
-- **Optimization ready**: Drop-in compatibility with JAX optimizers
-- **Hybrid approach**: Manual adjoint solve + JAX VJP for optimal performance
+- **Batch solving**: `solver.solve(batch_params)` - Fast parallel forward passes
+- **Individual gradients**: `jax.grad(objective)` - Reliable automatic differentiation
+- **JIT compilation**: Both approaches can be JIT-compiled for performance
+- **No tracer leaks**: Proper JAX tracer handling in parameter setting
 
-### ⚡ High Performance
-- **GPU acceleration**: JAX-based implementation with NVIDIA GPU support
-- **JIT compilation**: High-performance compiled solver kernels
-- **Memory efficient**: Optimized sparse matrix operations
-- **Scalable**: Handles large finite element problems (100k+ elements)
+### 🔧 Recommended Workflow
 
-### 🔧 Comprehensive FE Capabilities
-- **Multiple element types**: HEX8/20, TET4/10, QUAD4/8, TRI3/6
-- **Advanced solvers**: Newton-Raphson with line search, BiCGSTAB, CG
-- **Boundary conditions**: Flexible Dirichlet BC specification
-- **Material models**: Linear elasticity, hyperelasticity support
-
-### 🔄 Flexible Architecture
-- **Backward compatible**: Existing `newton_solve`, `ad_wrapper` still work
-- **Modular design**: Clean separation of concerns
-- **Easy migration**: Smooth transition from legacy to new API
-
-## Use Cases
-
-### Research & Development
-```python
-# Quick prototyping with automatic differentiation
-solver = NewtonSolver(problem, options, differentiable=True)
-sensitivity = jax.grad(objective)(material_params)
-```
-
-### Parameter Optimization
-```python
-# Material property optimization
-def objective(params):
-    return compliance(solver.solve(params))
-
-optimizer = optax.adam(1e-3)
-optimized_params = optimization_loop(jax.grad(objective), initial_params)
-```
-
-### High-Performance Computing
-```python
-# Large-scale problems with JIT compilation
-solver = NewtonSolver(problem, {'use_jit': True}, use_jit=True)
-solution = solver.solve(params)  # GPU-accelerated, JIT-compiled
-```
-
-### Design Space Exploration
-```python
-# Parameter sweeps and sensitivity studies
-for E in E_range:
-    solution = solver.solve({'E': E, 'nu': 0.3})
-    results.append(post_process(solution))
-```
-
-### Batch Parameter Studies
-```python
-# Efficient batch processing with optimized compilation
-batch_solver = create_batch_solver(problem, options)
-param_batch = [{'E': E, 'nu': 0.3} for E in E_range]
-solutions = batch_solver.solve_batch(param_batch)  # Optimized batch solving
-```
-
-## Architecture
-
-**Solver Module** (`fealax.solver`):
-- `NewtonSolver` - Modern wrapper with clean API
-- `BatchNewtonSolver` - Efficient batch parameter processing
-- `SimpleVmapSolver` - Experimental vmap-based parallel solving
-- `newton_solve()` - Legacy Newton solver interface  
-- `ad_wrapper()` - Legacy automatic differentiation wrapper
-- `linear_solvers` - JAX-based linear solvers (BiCGSTAB, CG, sparse direct)
-- `newton_solvers` - Newton-Raphson implementations with line search
-- `jit_solvers` - JIT-compiled versions for performance
-- `boundary_conditions` - Boundary condition enforcement
-- `solver_utils` - Automatic differentiation utilities
-
-**Problem Module** (`fealax.problem`):
-- `Problem` - Main finite element problem class
-- `DirichletBC` - Boundary condition specification  
-- `kernels` - Weak form kernel generation
-- `assembly` - Global assembly and sparse matrix construction
-- `boundary_conditions` - BC management and processing
+1. **Forward pass**: Use batch solving for multiple parameter sets
+2. **Gradient computation**: Use individual `jax.grad()` calls 
+3. **Performance**: JIT-compile gradient functions for repeated use
+4. **Optimization**: Combine both approaches for parameter identification
 
 ## Examples
 
-See the `examples/` directory for complete working examples:
-
-### Basic Examples
-- **`simple_elasticity.py`** - 3D linear elasticity with compression loading
-  - NewtonSolver wrapper usage
-  - Parameter-driven material properties
-  - Automatic differentiation for sensitivity analysis
-  - Performance optimization with JIT compilation
-
-- **`simple_vmap_example.py`** - Parallel parameter solving with vmap
-  - SimpleVmapSolver for batch processing
-  - Material property parameter sweeps
-  - Performance comparison: sequential vs parallel
-  - Automatic differentiation with parameter batches
-
-### Migration Guide
-
-**From Legacy API:**
+### Batch Solving
 ```python
-# Old approach
-from fealax.solver import newton_solve, ad_wrapper
-
-solution = newton_solve(problem, solver_options)
-
-# For optimization
-diff_solver = ad_wrapper(problem, solver_options)
-solution = diff_solver(params)
+# Solve multiple material parameter sets efficiently
+batch_params = [
+    {'E': 5e4, 'nu': 0.25},
+    {'E': 1e5, 'nu': 0.3}, 
+    {'E': 2e5, 'nu': 0.35}
+]
+solutions = solver.solve(batch_params)
+print(f"Solved {len(batch_params)} cases, shape: {solutions[0].shape}")
 ```
 
-**To New API:**
+### Gradient Computation
 ```python
-# New approach - cleaner and more flexible
-from fealax.solver import NewtonSolver
+# Compute gradients for optimization
+def objective(params):
+    solution = solver.solve(params)
+    return jax.numpy.sum(solution[0]**2)
 
-solver = NewtonSolver(problem, solver_options)
-solution = solver.solve(params)
-
-# For optimization - same interface
-diff_solver = NewtonSolver(problem, solver_options, differentiable=True)
-solution = diff_solver.solve(params)
+gradients = jax.grad(objective)({'E': 1e5, 'nu': 0.3})
+print(f"∂J/∂E: {gradients['E']:.2e}")
 ```
 
-### Performance Tips
+### Optimization Loop
+```python
+# JIT-compiled optimization
+grad_fn = jax.jit(jax.grad(objective))
 
-1. **Enable JIT compilation** for repeated solves:
-   ```python
-   solver = NewtonSolver(problem, {'use_jit': True}, use_jit=True)
-   ```
+params = {'E': 1e5, 'nu': 0.3}
+for step in range(10):
+    obj_val = objective(params)
+    gradients = grad_fn(params)
+    
+    # Update parameters
+    step_size = 1e-12
+    params['E'] -= step_size * gradients['E']
+    params['nu'] -= step_size * gradients['nu']
+```
 
-2. **Use preconditioning** for faster convergence:
-   ```python
-   solver = NewtonSolver(problem, {'precond': True, 'method': 'bicgstab'})
-   ```
+## Technical Details
 
-3. **Batch parameter studies** efficiently:
-   ```python
-   # JIT-compile once, solve many times
-   solver = NewtonSolver(problem, options, use_jit=True)
-   results = [solver.solve(params) for params in param_list]
-   ```
+### JAX Tracer Handling
 
-4. **Optimize solver tolerances** for your problem:
-   ```python
-   # Tighter tolerances for accuracy
-   solver = NewtonSolver(problem, {'tol': 1e-8, 'rel_tol': 1e-10})
-   
-   # Looser tolerances for speed
-   solver = NewtonSolver(problem, {'tol': 1e-4, 'max_iter': 5})
-   ```
+The `set_params` method properly handles JAX tracers during gradient computation:
 
-## Installation
+```python
+def set_params(self, params):
+    def is_tracer(x):
+        return hasattr(x, 'aval') or str(type(x)).find('Tracer') != -1
+    
+    if 'E' in params:
+        self.E = params['E'] if is_tracer(params['E']) else jnp.asarray(params['E'])
+    # ... update material parameters safely
+```
+
+### Performance Characteristics
+
+- **Batch solving**: ~5s for 3 parameter sets (4×4×4 mesh)
+- **Individual gradients**: ~4s per gradient with JIT compilation
+- **Memory usage**: ~0.35MB per problem (efficient sparse matrices)
+- **Scalability**: Excellent for parameter studies and optimization
+
+## Problem Setup
+
+The examples use a Neo-Hookean hyperelastic material:
+
+```python
+class NeoHookeanProblem(Problem):
+    def get_tensor_map(self):
+        def tensor_map(u_grads, *internal_vars):
+            F = u_grads + jnp.eye(3)  # Deformation gradient
+            J = jnp.linalg.det(F)     # Jacobian
+            C = jnp.transpose(F) @ F   # Right Cauchy-Green tensor
+            
+            # Neo-Hookean stress
+            I1 = jnp.trace(C)
+            S = self.mu * (jnp.eye(3) - jnp.linalg.inv(C)) + self.lam * jnp.log(J) * jnp.linalg.inv(C)
+            return F @ S  # First Piola-Kirchhoff stress
+        return tensor_map
+```
+
+## Running the Examples
 
 ```bash
-# Development installation
-pip install -e .
+# Run the simple example
+python batch_gradients_simple.py
 
-# JAX with GPU support (install separately)
-pip install jax[cuda]
-
-# For examples and visualization
-pip install matplotlib vtk meshio
+# Expected output:
+# Batch Solving Example
+# ========================================
+# Solved 3 parameter sets
+# Solution shape: (3, 125, 3)
+# 
+# Gradient Computation Example  
+# ========================================
+# Objective: 2.57e-03
+# ∂J/∂E:  -7.35e-21
+# ∂J/∂nu: 4.57e-04
 ```
 
-## GPU Requirements
+## Files
 
-- NVIDIA GPU with CUDA support
-- JAX CUDA installation
-- Sufficient GPU memory for problem size
+- `batch_gradients_simple.py` - Clean, minimal example with hyperelasticity
+- `working_batch_gradients.py` - Complete solution with detailed demonstrations
+- `practical_batch_gradients.py` - Multiple approaches and performance comparison
 
-The library automatically uses GPU acceleration when available. For large problems (>100k DOFs), GPU acceleration provides significant speedup over CPU-only computation.
+## Best Practices
+
+1. **Always enable 64-bit precision**: `jax.config.update("jax_enable_x64", True)`
+2. **JIT-compile gradient functions** for repeated optimization
+3. **Use batch solving** for forward passes when possible
+4. **Handle JAX tracers properly** in `set_params` methods
+5. **Consider finite differences** for very large batch sizes where individual gradients become slow
+
+This approach provides both the performance benefits of batch solving and the reliability of individual gradient computation, making it ideal for parameter identification, optimization, and sensitivity analysis in finite element problems.

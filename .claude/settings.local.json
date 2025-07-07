@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(find:*)",
+      "Bash(nvidia-smi:*)"
+    ],
+    "deny": []
+  }
+}

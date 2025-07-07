@@ -22,7 +22,7 @@ from .jit_solvers import (
 
 from jax import config
 config.update("jax_enable_x64", True)
-CHUNK_SIZE = 100000000
+CHUNK_SIZE = None
 
 
 def linear_incremental_solver(
@@ -344,7 +344,22 @@ def newton_solve(problem: Any, solver_options: Dict[str, Any] = {}) -> List[np.n
     
     # Check for early convergence before starting iterations
     def run_iterations():
-        final_state = jax.lax.while_loop(newton_condition, newton_body, initial_state)
+        # Use scan instead of while_loop for AD compatibility
+        def scan_body(carry, _):
+            # Check convergence
+            should_continue = newton_condition(carry)
+            
+            # Compute next state if not converged, otherwise keep current state
+            new_carry = jax.lax.cond(
+                should_continue,
+                lambda x: newton_body(x),
+                lambda x: x,
+                carry
+            )
+            return new_carry, None
+        
+        # Run for max_iter iterations
+        final_state, _ = jax.lax.scan(scan_body, initial_state, None, length=max_iter)
         return final_state[0]  # Return final dofs
         
     def early_convergence():

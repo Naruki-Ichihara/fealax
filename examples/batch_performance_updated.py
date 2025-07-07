@@ -294,7 +294,7 @@ def main():
     print("="*60)
     
     # Configuration
-    mesh_size = (20, 20, 20)  # Moderate size for testing
+    mesh_size = (30, 30, 30)  # Moderate size for testing
     batch_size = 5
     solver_options = {'tol': 1e-6, 'max_iter': 10}
     
@@ -333,17 +333,6 @@ def main():
     print(f"\nKey findings:")
     print(f"• JIT compilation provides {jit_speedup:.1f}x speedup")
     print(f"• Post-processing is very fast ({results['post_processing']['time']*1000:.1f}ms)")
-    print(f"• Native JAX argwhere integration working")
-    print(f"• Ready for optimization workflows")
-    
-    print(f"\nRecommendations:")
-    if jit_speedup > 1.5:
-        print("• Use JIT-compiled solve for parameter studies")
-        print("• Solver JIT: jitted_solve = jax.jit(lambda p: newton_solve(problem(p), opts))")
-    
-    print("• Always JIT-compile post-processing functions")
-    print("• Use JAX operations throughout for best performance")
-    
     return results
 
 if __name__ == "__main__":

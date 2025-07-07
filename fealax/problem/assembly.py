@@ -44,6 +44,7 @@ Example:
 
 import jax
 import jax.numpy as np
+import jax.numpy as jnp
 import jax.flatten_util
 from typing import Any, Callable, Optional, List, Tuple, Union
 import functools
@@ -52,6 +53,7 @@ from fealax.fe import FiniteElement
 from fealax import logger
 from fealax.problem.boundary_conditions import BoundaryConditionManager
 import gc
+import numpy as onp
 
 
 class AssemblyManager:
@@ -333,10 +335,10 @@ class AssemblyManager:
         return res_list
 
     @staticmethod
-    def compute_csr(
-        V: np.ndarray,
-        I: np.ndarray,
-        J: np.ndarray,
+    def _compute_csr_host(
+        V: onp.ndarray,
+        I: onp.ndarray,
+        J: onp.ndarray,
         num_total_dofs_all_vars: int,
         chunk_size: Optional[int] = None
     ) -> BCOO:
@@ -398,11 +400,7 @@ class AssemblyManager:
                 all_data.append(V_chunk)
                 indices_chunk = np.column_stack([I_chunk, J_chunk])
                 all_indices.append(indices_chunk)
-                
-                del V_chunk
-                del I_chunk
-                del J_chunk
-                gc.collect()
+
 
             # Combine all chunks
             combined_data = np.concatenate(all_data)
@@ -421,6 +419,43 @@ class AssemblyManager:
             )
 
         return csr_array
+
+    @staticmethod
+    def compute_csr(
+        V: np.ndarray,
+        I: np.ndarray,
+        J: np.ndarray,
+        num_total_dofs_all_vars: int,
+        chunk_size: Optional[int] = None
+    ) -> BCOO:
+        """Assemble the global sparse matrix in CSR format.
+
+        Constructs the global system matrix from element-level Jacobian contributions
+        stored in coordinate (COO) format. Supports memory-efficient assembly using
+        chunking for large problems that exceed available memory.
+
+        Args:
+            V (np.ndarray): Flattened array of all Jacobian values from element and
+                face contributions. Shape: (total_nnz,).
+            I (np.ndarray): Row indices for sparse matrix assembly. Shape: (total_nnz,).
+            J (np.ndarray): Column indices for sparse matrix assembly. Shape: (total_nnz,).
+            num_total_dofs_all_vars (int): Total number of degrees of freedom across
+                all variables in the system.
+            chunk_size (Optional[int], optional): Size of chunks for memory-efficient
+                assembly. If None, assembles the entire matrix at once. Useful for
+                large problems to control memory usage.
+
+        Returns:
+            BCOO: Sparse matrix in JAX BCOO (Block Coordinate) format with shape
+                (num_total_dofs_all_vars, num_total_dofs_all_vars).
+
+        Raises:
+            ValueError: If chunk_size is not positive when provided.
+        """
+        # Call the original host implementation directly for full AD support
+        return AssemblyManager._compute_csr_host(
+            V, I, J, num_total_dofs_all_vars, chunk_size
+        )
 
     @staticmethod
     def assemble(

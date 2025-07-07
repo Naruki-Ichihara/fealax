@@ -166,7 +166,7 @@ class NewtonSolver:
         
         logger.debug(f"Running vmap solver for batch size: {batch_size}")
         
-        # Try vmap first with the new vmap-compatible solver
+        # Try vmap first - if it fails due to tracer leaks, fall back to sequential
         try:
             logger.info("Attempting vmap solving for batch parameters")
             # Pass parameters in the order expected by vmap function
@@ -175,7 +175,13 @@ class NewtonSolver:
             logger.info("✓ Vmap solving successful!")
             return solutions
         except Exception as e:
-            logger.warning(f"Vmap failed: {e}, falling back to sequential solving")
+            error_msg = str(e).lower()
+            if "tracer" in error_msg or "leaked" in error_msg or "unexpected" in error_msg:
+                logger.info(f"Vmap failed due to tracer issues: {e}")
+                logger.info("Falling back to sequential solving (maintains correctness)")
+            else:
+                logger.warning(f"Vmap failed: {e}, falling back to sequential solving")
+            
             # Fall back to sequential solving
             param_dicts = []
             for i in range(batch_size):

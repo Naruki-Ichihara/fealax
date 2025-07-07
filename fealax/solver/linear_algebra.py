@@ -46,8 +46,9 @@ def zero_rows_jax(A: BCOO, row_indices: np.ndarray) -> BCOO:
         BCOO: Matrix with specified rows and columns zeroed and diagonal entries set to 1.0.
     """
     # Mark entries that should be zeroed (in constrained rows/columns)
-    row_constrained = np.any(A.indices[:, 0:1] == row_indices[None, :], axis=1)
-    col_constrained = np.any(A.indices[:, 1:2] == row_indices[None, :], axis=1)
+    # Use JAX-compatible vectorized membership test - much more memory efficient
+    row_constrained = np.isin(A.indices[:, 0], row_indices)
+    col_constrained = np.isin(A.indices[:, 1], row_indices)
     should_zero = row_constrained | col_constrained
     
     # Zero the data for constrained entries but keep the structure
