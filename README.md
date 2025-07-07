@@ -30,6 +30,15 @@ def objective(params):
 
 grad_fn = jax.grad(objective)
 gradients = grad_fn({'E': 1e5, 'nu': 0.3})
+
+# 3. Direct vmap usage (NEW!)
+def solve_single(E, nu):
+    return solver.solve({'E': E, 'nu': nu})
+
+vmap_solve = jax.vmap(solve_single)
+E_values = jax.numpy.array([5e4, 1e5, 2e5])
+nu_values = jax.numpy.array([0.25, 0.3, 0.35])
+solutions = vmap_solve(E_values, nu_values)
 ```
 
 ## Key Features
@@ -50,16 +59,34 @@ gradients = grad_fn({'E': 1e5, 'nu': 0.3})
 
 ## Examples
 
-### Batch Solving
+### Batch Solving (Multiple Methods)
+
+#### Method 1: List of dictionaries (original)
 ```python
-# Solve multiple material parameter sets efficiently
 batch_params = [
     {'E': 5e4, 'nu': 0.25},
     {'E': 1e5, 'nu': 0.3}, 
     {'E': 2e5, 'nu': 0.35}
 ]
 solutions = solver.solve(batch_params)
-print(f"Solved {len(batch_params)} cases, shape: {solutions[0].shape}")
+```
+
+#### Method 2: Structured dictionary (fastest!)
+```python
+batch_params = {
+    'E': jax.numpy.array([5e4, 1e5, 2e5]),
+    'nu': jax.numpy.array([0.25, 0.3, 0.35])
+}
+solutions = solver.solve(batch_params)
+```
+
+#### Method 3: Direct JAX vmap (most flexible)
+```python
+def solve_single(E, nu):
+    return solver.solve({'E': E, 'nu': nu})
+
+vmap_solve = jax.vmap(solve_single)
+solutions = vmap_solve(E_values, nu_values)
 ```
 
 ### Gradient Computation
@@ -155,6 +182,8 @@ python batch_gradients_simple.py
 - `batch_gradients_simple.py` - Clean, minimal example with hyperelasticity
 - `working_batch_gradients.py` - Complete solution with detailed demonstrations
 - `practical_batch_gradients.py` - Multiple approaches and performance comparison
+- `vmap_solver_examples.py` - Comprehensive JAX vmap usage examples
+- `test_vmap_solve.py` - Test suite for vmap compatibility
 
 ## Best Practices
 
